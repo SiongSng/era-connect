@@ -320,6 +320,7 @@ pub enum ModLoaderType {
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 pub struct AdvancedOptions {
     pub jvm_max_memory: Option<usize>,
+    pub jvm_arguments: String,
     pub auto_translate: bool,
     pub performance_optimizaiton: bool,
     pub font_optimization: bool,

@@ -224,6 +224,7 @@ pub async fn prepare_vanilla_download<'a>(
         if let Some(max_memory) = advanced_option.jvm_max_memory {
             jvm_flags.arguments.push(format!("-Xmx{max_memory}M"))
         }
+        jvm_flags.arguments.push(advanced_option.jvm_arguments);
     }
 
     let launch_args = LaunchArgs {
