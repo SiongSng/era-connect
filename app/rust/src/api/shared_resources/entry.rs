@@ -1,4 +1,3 @@
-use anyhow::anyhow;
 use anyhow::Context;
 use flutter_rust_bridge::frb;
 use flutter_rust_bridge::setup_default_user_utils;
@@ -34,7 +33,12 @@ use crate::api::backend_exclusive::vanilla::version::VersionMetadata;
 use crate::api::shared_resources::authentication::msa_flow::LoginFlowErrors;
 use crate::api::shared_resources::collection::Collection;
 use crate::api::shared_resources::collection::ModLoaderType;
-use crate::frb_generated::StreamSink;
+use crate::api::shared_resources::collection::{
+    AdvancedOptions, Collection, CollectionId, ModLoader,
+};
+use crate::api::shared_resources::collection::{
+    AdvancedOptions, Collection, CollectionId, ModLoader,
+};
 
 use super::collection::AdvancedOptions;
 use super::collection::CollectionId;
@@ -46,13 +50,26 @@ pub static DATA_DIR: Lazy<PathBuf> = Lazy::new(|| {
         .join("era-connect")
 });
 
+pub static STORAGE: Lazy<StorageState> = Lazy::new(StorageState::new);
+
+/// A globally accessible sender for updating download progress, utilizing an unbounded channel for asynchronous message passing.
+///
+/// This static variable enables various parts of an application to send updates about download progress or request data
+/// regarding current progress states. It leverages `HashMapMessage` to perform actions like insertions, removals, and queries
+/// against a hashmap that tracks the progress of each download uniquely identified by `CollectionId`.
+/// # Examples
+/// ```rust
+///     let (tx, mut rx) = unbounded_channel();
+///     DOWNLOAD_PROGRESS.send(HashMapMessage::Get(Arc::clone(&id), tx))?;
+///     if let Some(Some(x)) = rx.recv().await {
+///         debug!("{:#?}", x);
+///     }
+/// ```
 pub static DOWNLOAD_PROGRESS: Lazy<UnboundedSender<HashMapMessage>> = Lazy::new(|| {
     let (sender, receiver) = unbounded_channel();
     spawn_hashmap_manager_thread(receiver);
     sender
 });
-
-pub static STORAGE: Lazy<StorageState> = Lazy::new(StorageState::new);
 
 pub enum HashMapMessage {
     Insert(Arc<CollectionId>, Progress),
@@ -83,7 +100,6 @@ fn spawn_hashmap_manager_thread(mut receiver: UnboundedReceiver<HashMapMessage>)
     });
 }
 
-#[frb(init)]
 pub fn init_app() -> anyhow::Result<()> {
     setup_default_user_utils();
     setup_logger()?;
@@ -126,7 +142,6 @@ fn setup_logger() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[frb(sync)]
 pub fn get_ui_layout_storage(key: UILayoutKey) -> UILayoutValue {
     let value = STORAGE
         .global_settings
@@ -148,12 +163,10 @@ pub fn set_ui_layout_storage(value: UILayoutValue) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[frb(sync)]
 pub fn get_account_storage(key: AccountStorageKey) -> AccountStorageValue {
     STORAGE.account_storage.blocking_read().get_value(key)
 }
 
-#[frb(sync)]
 pub fn get_skin_file_path(skin: MinecraftSkin) -> String {
     skin.get_head_file_path().to_string_lossy().to_string()
 }
@@ -165,8 +178,8 @@ pub async fn remove_minecraft_account(uuid: Uuid) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn minecraft_login_flow(skin: StreamSink<LoginFlowEvent>) -> anyhow::Result<()> {
-    let result = authentication::msa_flow::login_flow(&skin).await;
+pub async fn minecraft_login_flow(skin: UnboundedSender<LoginFlowEvent>) -> anyhow::Result<()> {
+    let result = authentication::msa_flow::login_flow(skin.clone()).await;
     match result {
         Ok(account) => {
             if let Some(skin) = account.skins.first() {
@@ -177,15 +190,13 @@ pub async fn minecraft_login_flow(skin: StreamSink<LoginFlowEvent>) -> anyhow::R
             storage.add_account(account.clone(), true);
             storage.save()?;
 
-            skin.add(LoginFlowEvent::Success(account))
-                .map_err(|x| anyhow!(x))?;
+            skin.send(LoginFlowEvent::Success(account))?;
             info!("Successfully login minecraft account");
         }
         Err(e) => {
-            skin.add(LoginFlowEvent::Error(LoginFlowErrors::UnknownError(
+            skin.send(LoginFlowEvent::Error(LoginFlowErrors::UnknownError(
                 format!("{e:#}"),
-            )))
-            .map_err(|x| anyhow!(x))?;
+            )))?;
             warn!("Failed to login minecraft account: {:#}", e);
         }
     }
@@ -194,15 +205,12 @@ pub async fn minecraft_login_flow(skin: StreamSink<LoginFlowEvent>) -> anyhow::R
 }
 
 pub async fn create_collection(
-    display_name: String,
+    display_name: impl Into<String>,
     version_metadata: VersionMetadata,
     mod_loader: Option<ModLoader>,
     advanced_options: Option<AdvancedOptions>,
 ) -> anyhow::Result<()> {
-    //     let mut p = STORAGE.collections.write().await;
-    //     let collection = p.last_mut().unwrap();
-    //     dbg!(&collection);
-    // NOTE: testing purposes
+    let display_name = display_name.into();
     let mod_loader = Some(ModLoader {
         mod_loader_type: ModLoaderType::Fabric,
         version: None,
@@ -258,6 +266,7 @@ pub async fn create_collection(
         "Successfully created collection basic file at {}",
         collection.entry_path.display()
     );
+    // collection.launch_game().await?;
 
     collection.download_mods().await?;
     // dbg!(&collection.mod_manager.mods);

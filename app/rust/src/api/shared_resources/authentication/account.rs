@@ -51,7 +51,6 @@ pub struct AccountToken {
 }
 
 impl MinecraftSkin {
-    #[frb(ignore)]
     pub async fn download_skin(&self) -> anyhow::Result<()> {
         let raw_image = download_file(&self.url, None)
             .await

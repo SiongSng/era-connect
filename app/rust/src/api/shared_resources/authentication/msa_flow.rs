@@ -1,9 +1,7 @@
 use std::ops::Add;
 
-use anyhow::anyhow;
 use anyhow::Context;
 use chrono::{Duration, Utc};
-use flutter_rust_bridge::frb;
 use oauth2::basic::{BasicClient, BasicErrorResponseType, BasicTokenType};
 use oauth2::reqwest::async_http_client;
 use oauth2::{
@@ -13,10 +11,9 @@ use oauth2::{
 };
 use serde::Deserialize;
 use serde_json::json;
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::time::sleep;
 use uuid::Uuid;
-
-use crate::frb_generated::StreamSink;
 
 use super::account::{AccountToken, MinecraftAccount, MinecraftCape, MinecraftSkin};
 use super::{
@@ -123,63 +120,53 @@ pub struct MinecraftUserProfile {
     pub capes: Vec<MinecraftCape>,
 }
 
-#[frb(ignore)]
-pub async fn login_flow(skin: &StreamSink<LoginFlowEvent>) -> anyhow::Result<MinecraftAccount> {
-    skin.add(LoginFlowEvent::Stage(LoginFlowStage::FetchingDeviceCode))
-        .map_err(|x| anyhow!(x))?;
+pub async fn login_flow(skin: UnboundedSender<LoginFlowEvent>) -> anyhow::Result<MinecraftAccount> {
+    skin.send(LoginFlowEvent::Stage(LoginFlowStage::FetchingDeviceCode))?;
 
     // Device Code Flow
     let client = create_oauth_client()?;
     let device_auth_response = fetch_device_code(&client).await?;
-    skin.add(LoginFlowEvent::DeviceCode(LoginFlowDeviceCode {
+    skin.send(LoginFlowEvent::DeviceCode(LoginFlowDeviceCode {
         verification_uri: device_auth_response.verification_uri().to_string(),
         user_code: device_auth_response.user_code().secret().to_string(),
-    }))
-    .map_err(|x| anyhow!(x))?;
-    skin.add(LoginFlowEvent::Stage(LoginFlowStage::WaitingForUser))
-        .map_err(|x| anyhow!(x))?;
+    }))?;
+    skin.send(LoginFlowEvent::Stage(LoginFlowStage::WaitingForUser))?;
 
     // Microsoft Authentication Flow
     let (microsoft_token, refresh_token) =
         fetch_microsoft_token(&client, &device_auth_response).await?;
-    skin.add(LoginFlowEvent::Stage(
+    skin.send(LoginFlowEvent::Stage(
         LoginFlowStage::AuthenticatingXboxLive,
-    ))
-    .map_err(|x| anyhow!(x))?;
+    ))?;
 
     // Xbox Live Authentication Flow
     let (xbl_token, user_hash) = authenticate_xbox_live(&microsoft_token).await?;
-    skin.add(LoginFlowEvent::Stage(LoginFlowStage::FetchingXstsToken))
-        .map_err(|x| anyhow!(x))?;
+    skin.send(LoginFlowEvent::Stage(LoginFlowStage::FetchingXstsToken))?;
 
     // XSTS Authentication Flow
     let xsts_response = fetch_xsts_token(&xbl_token).await?;
     let xsts_token: String = match xsts_response {
         XstsResponse::Success(token) => {
-            skin.add(LoginFlowEvent::Stage(
+            skin.send(LoginFlowEvent::Stage(
                 LoginFlowStage::FetchingMinecraftToken,
-            ))
-            .map_err(|x| anyhow!(x))?;
+            ))?;
 
             token
         }
         XstsResponse::Error(e) => {
-            skin.add(LoginFlowEvent::Error(LoginFlowErrors::XstsError(e.xerr)))
-                .map_err(|x| anyhow!(x))?;
+            skin.send(LoginFlowEvent::Error(LoginFlowErrors::XstsError(e.xerr)))?;
             return Err(anyhow::anyhow!("XSTS Error"));
         }
     };
 
     // Minecraft Authentication Flow
     let (mc_access_token, expires_in) = fetch_minecraft_token(&xsts_token, &user_hash).await?;
-    skin.add(LoginFlowEvent::Stage(LoginFlowStage::GettingProfile))
-        .map_err(|x| anyhow!(x))?;
+    skin.send(LoginFlowEvent::Stage(LoginFlowStage::GettingProfile))?;
 
     let profile = match get_user_profile(&mc_access_token).await {
         Ok(profile) => profile,
         Err(e) => {
-            skin.add(LoginFlowEvent::Error(LoginFlowErrors::GameNotOwned))
-                .map_err(|x| anyhow!(x))?;
+            skin.send(LoginFlowEvent::Error(LoginFlowErrors::GameNotOwned))?;
             return Err(anyhow::anyhow!("Game not owned: {}", e));
         }
     };
