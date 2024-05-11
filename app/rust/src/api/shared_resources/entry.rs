@@ -65,13 +65,63 @@ pub static STORAGE: Lazy<StorageState> = Lazy::new(StorageState::new);
 ///         debug!("{:#?}", x);
 ///     }
 /// ```
-pub static DOWNLOAD_PROGRESS: Lazy<UnboundedSender<HashMapMessage>> = Lazy::new(|| {
-    let (sender, receiver) = unbounded_channel();
-    spawn_hashmap_manager_thread(receiver);
-    sender
-});
+pub static DOWNLOAD_PROGRESS: DownloadProgress = DownloadProgress::new();
 
-pub enum HashMapMessage {
+pub struct DownloadProgress(Lazy<UnboundedSender<HashMapMessage>>);
+
+impl DownloadProgress {
+    const fn new() -> Self {
+        Self(Lazy::new(|| {
+            let (sender, receiver) = unbounded_channel();
+            spawn_hashmap_manager_thread(receiver);
+            sender
+        }))
+    }
+
+    pub fn get_continuous_progress_handle(
+        &'static self,
+        collection: &Collection,
+        sender: UnboundedSender<String>,
+    ) -> flutter_rust_bridge::JoinHandle<Result<(), anyhow::Error>> {
+        let id = Arc::new(collection.get_collection_id());
+        tokio::spawn(async move {
+            loop {
+                if let Some(x) = self.get(Arc::clone(&id)).await? {
+                    if x.percentages >= 100.0 {
+                        break;
+                    }
+                    sender.send(format!("{:#?}", x))?;
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            Ok::<(), anyhow::Error>(())
+        })
+    }
+
+    pub async fn get(
+        &self,
+        id: impl Into<Arc<CollectionId>>,
+    ) -> anyhow::Result<Option<Arc<Progress>>> {
+        let id = id.into();
+        let (tx, mut rx) = unbounded_channel();
+        self.0.send(HashMapMessage::Get(id, tx))?;
+        Ok(rx.recv().await.flatten())
+    }
+    pub async fn insert(
+        &self,
+        id: impl Into<Arc<CollectionId>>,
+        value: Progress,
+    ) -> anyhow::Result<()> {
+        self.0.send(HashMapMessage::Insert(id.into(), value))?;
+        Ok(())
+    }
+    pub async fn remove(&self, id: impl Into<Arc<CollectionId>>) -> anyhow::Result<()> {
+        self.0.send(HashMapMessage::Remove(id.into()))?;
+        Ok(())
+    }
+}
+
+enum HashMapMessage {
     Insert(Arc<CollectionId>, Progress),
     Remove(Arc<CollectionId>),
     Get(Arc<CollectionId>, UnboundedSender<Option<Arc<Progress>>>),
@@ -246,29 +296,22 @@ pub async fn create_collection(
         "Successfully created collection basic file at {}",
         collection.entry_path.display()
     );
-    let id = Arc::new(collection.get_collection_id());
-    let download_handle = tokio::spawn(async move {
-        loop {
-            let (tx, mut rx) = unbounded_channel();
-            DOWNLOAD_PROGRESS.send(HashMapMessage::Get(Arc::clone(&id), tx))?;
-            if let Some(Some(x)) = rx.recv().await {
-                if x.percentages >= 100.0 {
-                    break;
-                }
-                debug!("{:#?}", x);
-            }
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-        Ok::<(), anyhow::Error>(())
-    });
 
     info!(
         "Successfully created collection basic file at {}",
         collection.entry_path.display()
     );
     // collection.launch_game().await?;
-
+    collection.download_game().await?;
     collection.download_mods().await?;
+
+    let (tx, mut rx) = unbounded_channel();
+    let download_handle = DOWNLOAD_PROGRESS.get_continuous_progress_handle(&collection, tx);
+
+    while let Some(x) = rx.recv().await {
+        info!("{:#?}", x);
+    }
+
     // dbg!(&collection.mod_manager.mods);
 
     collection.launch_game().await?;

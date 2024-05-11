@@ -22,7 +22,7 @@ use tokio::{
 
 use crate::api::shared_resources::{
     collection::CollectionId,
-    entry::{HashMapMessage, DOWNLOAD_PROGRESS, STORAGE},
+    entry::{DOWNLOAD_PROGRESS, STORAGE},
 };
 
 pub type HandlesType<'a> = Vec<BoxFuture<'a, anyhow::Result<()>>>;
@@ -223,8 +223,10 @@ pub async fn execute_and_progress(
     download_complete.store(true, Ordering::Release);
     let progress = output.await?;
 
-    DOWNLOAD_PROGRESS.send(HashMapMessage::Insert(Arc::clone(&arc_id), progress))?;
-    DOWNLOAD_PROGRESS.send(HashMapMessage::Remove(arc_id))?;
+    DOWNLOAD_PROGRESS
+        .insert(Arc::clone(&arc_id), progress)
+        .await?;
+    DOWNLOAD_PROGRESS.remove(arc_id).await?;
 
     debug!("finish download request");
 
@@ -302,7 +304,8 @@ pub async fn rolling_average(
             prev_bytes = current;
             instant = Instant::now();
             DOWNLOAD_PROGRESS
-                .send(HashMapMessage::Insert(Arc::clone(&id), progress))
+                .insert(Arc::clone(&id), progress)
+                .await
                 .unwrap();
         }
     }
