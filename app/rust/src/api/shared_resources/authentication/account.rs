@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 
 use anyhow::Context;
-use flutter_rust_bridge::frb;
 use image::{imageops, DynamicImage, ImageFormat};
 use serde::{Deserialize, Serialize};
 use tokio::fs;

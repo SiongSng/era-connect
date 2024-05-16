@@ -1,6 +1,5 @@
 use std::{borrow::Cow, path::PathBuf};
 
-pub use flutter_rust_bridge::frb;
 use serde::{Deserialize, Serialize};
 use struct_key_value_pair::VariantStruct;
 

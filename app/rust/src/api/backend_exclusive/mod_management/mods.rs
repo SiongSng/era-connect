@@ -2,7 +2,6 @@ use anyhow::bail;
 use ferinth::structures::search::Facet;
 use ferinth::structures::search::Sort;
 use ferinth::structures::version::DependencyType;
-use flutter_rust_bridge::frb;
 use furse::structures::file_structs::FileRelationType;
 use furse::structures::file_structs::HashAlgo;
 use futures::StreamExt;
@@ -125,7 +124,6 @@ impl
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[frb(opaque)]
 pub struct ModManager {
     pub mods: Vec<ModMetadata>,
     #[serde(skip)]

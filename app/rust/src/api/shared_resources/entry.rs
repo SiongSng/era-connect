@@ -1,7 +1,6 @@
 use anyhow::Context;
-use flutter_rust_bridge::frb;
 use flutter_rust_bridge::setup_default_user_utils;
-use log::{debug, info, warn};
+use log::{info, warn};
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -33,16 +32,7 @@ use crate::api::backend_exclusive::vanilla::version::VersionMetadata;
 use crate::api::shared_resources::authentication::msa_flow::LoginFlowErrors;
 use crate::api::shared_resources::collection::Collection;
 use crate::api::shared_resources::collection::ModLoaderType;
-use crate::api::shared_resources::collection::{
-    AdvancedOptions, Collection, CollectionId, ModLoader,
-};
-use crate::api::shared_resources::collection::{
-    AdvancedOptions, Collection, CollectionId, ModLoader,
-};
-
-use super::collection::AdvancedOptions;
-use super::collection::CollectionId;
-use super::collection::ModLoader;
+use crate::api::shared_resources::collection::{AdvancedOptions, CollectionId, ModLoader};
 
 pub static DATA_DIR: Lazy<PathBuf> = Lazy::new(|| {
     dirs::data_dir()
@@ -302,7 +292,7 @@ pub async fn create_collection(
         collection.entry_path.display()
     );
     // collection.launch_game().await?;
-    collection.download_game().await?;
+    collection.verify_and_download_game().await?;
     collection.download_mods().await?;
 
     let (tx, mut rx) = unbounded_channel();

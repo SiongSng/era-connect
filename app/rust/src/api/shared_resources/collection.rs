@@ -2,7 +2,6 @@ pub use std::path::PathBuf;
 use std::{borrow::Cow, fs::create_dir_all};
 
 use chrono::{DateTime, Duration, Utc};
-use flutter_rust_bridge::frb;
 use log::info;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -26,7 +25,6 @@ use crate::api::{
 
 #[serde_with::serde_as]
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
-#[frb(opaque)]
 pub struct Collection {
     pub display_name: String,
     pub minecraft_version: VersionMetadata,
@@ -85,7 +83,6 @@ impl Collection {
     }
 
     /// use project id(slug also works) to add mod, will deal with dependencies insertion
-    #[frb(ignore)]
     pub async fn add_modrinth_mod(
         &mut self,
         project_id: impl AsRef<str> + Send + Sync,
@@ -101,7 +98,6 @@ impl Collection {
         Ok(())
     }
 
-    #[frb(ignore)]
     pub async fn add_multiple_modrinth_mod(
         &mut self,
         project_ids: Vec<&str>,
@@ -119,7 +115,6 @@ impl Collection {
         self.save()?;
         Ok(())
     }
-    #[frb(ignore)]
     pub async fn add_curseforge_mod(
         &mut self,
         project_id: i32,
@@ -134,7 +129,6 @@ impl Collection {
         Ok(())
     }
 
-    #[frb(ignore)]
     pub async fn download_mods(&self) -> anyhow::Result<()> {
         let id = self.get_collection_id();
         let download_args = self.mod_manager.get_download()?;
@@ -157,7 +151,6 @@ impl Collection {
         vanilla::launcher::launch_game(&self.launch_args.as_ref().unwrap()).await
     }
 
-    #[frb(ignore)]
     pub async unsafe fn launch_game_unchecked(&self) -> anyhow::Result<()> {
         vanilla::launcher::launch_game(&self.launch_args.as_ref().unwrap_unchecked()).await
     }
