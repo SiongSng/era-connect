@@ -3,12 +3,14 @@ use flutter_rust_bridge::setup_default_user_utils;
 use log::{info, warn};
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
+use std::convert::identity;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::{fs::create_dir_all, time::Duration};
 use tokio::sync::mpsc::unbounded_channel;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::UnboundedSender;
+use tokio_stream::StreamExt;
 
 use uuid::Uuid;
 
@@ -55,17 +57,40 @@ pub static STORAGE: Lazy<StorageState> = Lazy::new(StorageState::new);
 ///         debug!("{:#?}", x);
 ///     }
 /// ```
-pub static DOWNLOAD_PROGRESS: DownloadProgress = DownloadProgress::new();
+pub static DOWNLOAD_PROGRESS: Lazy<DownloadProgress> = Lazy::new(DownloadProgress::new);
 
-pub struct DownloadProgress(Lazy<UnboundedSender<HashMapMessage>>);
+#[derive(Clone)]
+pub struct DownloadProgress(UnboundedSender<HashMapMessage>);
+
+impl PartialEq for DownloadProgress {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.same_channel(&other.0)
+    }
+}
 
 impl DownloadProgress {
-    const fn new() -> Self {
-        Self(Lazy::new(|| {
+    fn new() -> Self {
+        Self({
             let (sender, receiver) = unbounded_channel();
             spawn_hashmap_manager_thread(receiver);
             sender
-        }))
+        })
+    }
+
+    pub async fn get_all(&self) -> anyhow::Result<Vec<Arc<Progress>>> {
+        tokio_stream::iter(
+            STORAGE
+                .collections
+                .read()
+                .await
+                .iter()
+                .map(Collection::get_collection_id),
+        )
+        .then(|x| self.get(x))
+        .map(Result::transpose)
+        .filter_map(identity)
+        .collect::<anyhow::Result<Vec<_>>>()
+        .await
     }
 
     pub fn get_continuous_progress_handle(
@@ -111,6 +136,7 @@ impl DownloadProgress {
     }
 }
 
+#[derive(Clone)]
 enum HashMapMessage {
     Insert(Arc<CollectionId>, Progress),
     Remove(Arc<CollectionId>),
@@ -182,29 +208,16 @@ fn setup_logger() -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn get_ui_layout_storage(key: UILayoutKey) -> UILayoutValue {
-    let value = STORAGE
-        .global_settings
-        .blocking_read()
-        .ui_layout
-        .get_value(key);
-    value
-}
-
 pub async fn get_vanilla_versions() -> anyhow::Result<Vec<VersionMetadata>> {
     vanilla::version::get_versions().await
 }
 
-pub fn set_ui_layout_storage(value: UILayoutValue) -> anyhow::Result<()> {
-    let global_settings = &mut *STORAGE.global_settings.blocking_write();
+pub async fn set_ui_layout_storage(value: UILayoutValue) -> anyhow::Result<()> {
+    let global_settings = &mut *STORAGE.global_settings.write().await;
     let ui_layout = &mut global_settings.ui_layout;
     ui_layout.set_value(value);
     global_settings.save()?;
     Ok(())
-}
-
-pub fn get_account_storage(key: AccountStorageKey) -> AccountStorageValue {
-    STORAGE.account_storage.blocking_read().get_value(key)
 }
 
 pub fn get_skin_file_path(skin: MinecraftSkin) -> String {
@@ -212,7 +225,7 @@ pub fn get_skin_file_path(skin: MinecraftSkin) -> String {
 }
 
 pub async fn remove_minecraft_account(uuid: Uuid) -> anyhow::Result<()> {
-    let mut storage = STORAGE.account_storage.write().await;
+    let storage = &mut *STORAGE.account_storage.write().await;
     storage.remove_account(uuid);
     storage.save()?;
     Ok(())
@@ -226,7 +239,7 @@ pub async fn minecraft_login_flow(skin: UnboundedSender<LoginFlowEvent>) -> anyh
                 skin.download_skin().await?;
             }
 
-            let mut storage = STORAGE.account_storage.write().await;
+            let storage = &mut STORAGE.account_storage.write().await;
             storage.add_account(account.clone(), true);
             storage.save()?;
 
@@ -261,21 +274,18 @@ pub async fn create_collection(
         .find(|x| x.id == "1.20.2")
         .unwrap();
     let mut collection =
-        Collection::create(display_name, version_metadata, mod_loader, advanced_options)?;
+        Collection::create(display_name, version_metadata, mod_loader, advanced_options).await?;
 
     collection
         .add_multiple_modrinth_mod(
             vec![
                 "fabric-api",
-                "distanthorizons",
                 "sodium",
                 "modmenu",
                 "ferrite-core",
                 "lazydfu",
                 "iris",
-                "continuity",
                 "indium",
-                "rpmtw-update-mod",
             ],
             vec![],
             Some(vec![ModOverride::IgnoreMinorGameVersion]),
@@ -287,10 +297,6 @@ pub async fn create_collection(
         collection.entry_path.display()
     );
 
-    info!(
-        "Successfully created collection basic file at {}",
-        collection.entry_path.display()
-    );
     // collection.launch_game().await?;
     collection.verify_and_download_game().await?;
     collection.download_mods().await?;
@@ -303,8 +309,6 @@ pub async fn create_collection(
     }
 
     // dbg!(&collection.mod_manager.mods);
-
-    collection.launch_game().await?;
 
     info!("Successfully finished downloading game");
 

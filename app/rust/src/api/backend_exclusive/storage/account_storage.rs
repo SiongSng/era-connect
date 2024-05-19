@@ -10,7 +10,7 @@ use super::storage_loader::{StorageInstance, StorageLoader};
 
 const ACCOUNT_FILE_NAME: &str = "accounts.json";
 
-#[derive(Serialize, Deserialize, Default, Clone, Debug, VariantStruct)]
+#[derive(Serialize, Deserialize, Default, Clone, Debug, VariantStruct, PartialEq)]
 #[serde(default)]
 pub struct AccountStorage {
     pub accounts: Vec<MinecraftAccount>,

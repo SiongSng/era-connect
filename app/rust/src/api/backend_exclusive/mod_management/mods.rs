@@ -4,9 +4,11 @@ use ferinth::structures::search::Sort;
 use ferinth::structures::version::DependencyType;
 use furse::structures::file_structs::FileRelationType;
 use furse::structures::file_structs::HashAlgo;
+use furse::structures::mod_structs::ModAsset;
 use futures::StreamExt;
 use log::debug;
 use once_cell::sync::Lazy;
+use reqwest::Url;
 use serde::Deserialize;
 use serde::Serialize;
 use std::cmp;
@@ -23,6 +25,7 @@ use async_recursion::async_recursion;
 use log::error;
 use tokio::fs;
 
+use crate::api::backend_exclusive::download::extract_filename;
 use crate::api::backend_exclusive::vanilla::version::VersionMetadata;
 use crate::api::shared_resources::collection::ModLoader;
 use crate::api::{
@@ -45,7 +48,21 @@ pub struct ModMetadata {
     pub tag: Vec<Tag>,
     pub overrides: Vec<ModOverride>,
     pub incompatiable_mods: Option<Vec<ModMetadata>>,
+    icon_directory: PathBuf,
+    icon_url: Option<Url>,
     mod_data: RawModData,
+}
+
+impl ModMetadata {
+    pub fn get_icon_path(&self) -> Option<PathBuf> {
+        self.icon_url.as_ref().map(|icon| {
+            self.icon_directory.join(format!(
+                "{}_{}",
+                self.project_id.to_string(),
+                extract_filename(icon.to_string()).unwrap()
+            ))
+        })
+    }
 }
 
 impl PartialOrd for ModMetadata {
@@ -70,6 +87,15 @@ impl Eq for ModMetadata {}
 pub enum ProjectId {
     Modrinth(String),
     Curseforge(i32),
+}
+
+impl ToString for ProjectId {
+    fn to_string(&self) -> String {
+        match self {
+            Self::Modrinth(x) => x.to_string(),
+            Self::Curseforge(x) => x.to_string(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -130,6 +156,7 @@ pub struct ModManager {
     cache: Option<Vec<VersionMetadata>>,
 
     game_directory: PathBuf,
+    icon_directory: PathBuf,
     mod_loader: Option<ModLoader>,
     target_game_version: VersionMetadata,
 }
@@ -149,6 +176,7 @@ impl ModManager {
     #[must_use]
     pub fn new(
         game_directory: PathBuf,
+        icon_directory: PathBuf,
         mod_loader: Option<ModLoader>,
         target_game_version: VersionMetadata,
     ) -> Self {
@@ -158,17 +186,34 @@ impl ModManager {
             game_directory,
             mod_loader,
             target_game_version,
+            icon_directory,
         }
     }
     pub fn get_download(&self) -> anyhow::Result<DownloadArgs> {
         let current_size = Arc::new(AtomicUsize::new(0));
         let total_size = Arc::new(AtomicUsize::new(0));
         let base_path = self.game_directory.join("mods");
+        let icon_base_path = &self.icon_directory;
         if !base_path.exists() {
             create_dir_all(&base_path)?;
         }
+        if !icon_base_path.exists() {
+            create_dir_all(&icon_base_path)?;
+        }
         let mut handles = HandlesType::new();
         for minecraft_mod in &self.mods {
+            let icon = minecraft_mod.icon_url.as_ref();
+            let icon_path = minecraft_mod.get_icon_path();
+            let current_size_clone = Arc::clone(&current_size);
+            handles.push(Box::pin(async move {
+                if let (Some(icon), Some(icon_path)) = (icon, icon_path) {
+                    if !icon_path.exists() {
+                        let bytes = download_file(icon, Some(current_size_clone)).await?;
+                        fs::write(icon_path, bytes).await?;
+                    }
+                }
+                Ok::<(), anyhow::Error>(())
+            }));
             match &minecraft_mod.mod_data {
                 RawModData::Modrinth(minecraft_mod) => {
                     for file in &minecraft_mod.files {
@@ -180,15 +225,18 @@ impl ModManager {
                         let current_size_clone = Arc::clone(&current_size);
                         let total_size_clone = Arc::clone(&total_size);
                         handles.push(Box::pin(async move {
+                            let mod_writer = |path| async move {
+                                total_size_clone.fetch_add(size, Ordering::Relaxed);
+                                let bytes =
+                                    download_file(url, Some(current_size_clone.clone())).await?;
+                                fs::write(path, bytes).await?;
+                                Ok::<(), anyhow::Error>(())
+                            };
                             if !path.exists() {
-                                total_size_clone.fetch_add(size, Ordering::Relaxed);
-                                let bytes = download_file(url, Some(current_size_clone)).await?;
-                                fs::write(path, bytes).await?;
+                                mod_writer(path).await?;
                             } else if let Err(x) = validate_sha1(&path, hash).await {
-                                total_size_clone.fetch_add(size, Ordering::Relaxed);
                                 error!("{x}");
-                                let bytes = download_file(url, Some(current_size_clone)).await?;
-                                fs::write(path, bytes).await?;
+                                mod_writer(path).await?;
                             }
                             Ok(())
                         }));
@@ -317,8 +365,13 @@ impl ModManager {
         tag: Vec<Tag>,
         mod_override: Vec<ModOverride>,
     ) -> anyhow::Result<()> {
-        let (mod_metadata, is_fabric_api) =
-            Self::raw_mod_transformation(minecraft_mod_data, mod_override.clone(), tag).await?;
+        let (mod_metadata, is_fabric_api) = Self::raw_mod_transformation(
+            self.icon_directory.clone(),
+            minecraft_mod_data,
+            mod_override.clone(),
+            tag,
+        )
+        .await?;
 
         if let Some(previous) = self.mods.iter_mut().find(|x| **x == mod_metadata) {
             if let Some(order) = mod_metadata.partial_cmp(&previous) {
@@ -351,11 +404,16 @@ impl ModManager {
         let buffered = tokio_stream::iter(minecraft_mod_data.into_iter())
             .map(|mod_metadata| {
                 let mod_override_cloned = mod_override.clone();
+                let icon_directory_cloned = self.icon_directory.clone();
                 let tag_cloned = tag.clone();
                 tokio::spawn(async move {
-                    let (mod_metadata, is_fabric_api) =
-                        Self::raw_mod_transformation(mod_metadata, mod_override_cloned, tag_cloned)
-                            .await?;
+                    let (mod_metadata, is_fabric_api) = Self::raw_mod_transformation(
+                        icon_directory_cloned,
+                        mod_metadata,
+                        mod_override_cloned,
+                        tag_cloned,
+                    )
+                    .await?;
                     Ok((mod_metadata, is_fabric_api))
                 })
             })
@@ -385,6 +443,7 @@ impl ModManager {
     }
 
     async fn raw_mod_transformation(
+        icon_directory: PathBuf,
         minecraft_mod_data: RawModData,
         mod_override: Vec<ModOverride>,
         tag: Vec<Tag>,
@@ -406,6 +465,8 @@ impl ModManager {
                     incompatiable_mods: None,
                     overrides: mod_override,
                     mod_data: minecraft_mod_data,
+                    icon_url: project.icon_url,
+                    icon_directory,
                 }
             }
             RawModData::Curseforge {
@@ -413,6 +474,7 @@ impl ModManager {
                 ..
             } => {
                 let project = FURSE.get_mod(minecraft_mod.mod_id).await?;
+                let icon_url = project.logo.map(|x| x.thumbnail_url);
                 ModMetadata {
                     name: project.name,
                     project_id: ProjectId::Curseforge(minecraft_mod.mod_id),
@@ -423,6 +485,8 @@ impl ModManager {
                     incompatiable_mods: None,
                     overrides: mod_override,
                     mod_data: minecraft_mod_data,
+                    icon_url,
+                    icon_directory,
                 }
             }
         };

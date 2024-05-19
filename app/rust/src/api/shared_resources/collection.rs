@@ -14,6 +14,7 @@ use crate::api::{
         download::{execute_and_progress, DownloadBias},
         mod_management::mods::{ModManager, ModOverride, Tag, FERINTH, FURSE},
         modding::forge::mod_loader_download,
+        storage::storage_loader::StorageInstance,
         vanilla::{
             self,
             launcher::{full_vanilla_download, LaunchArgs},
@@ -22,6 +23,8 @@ use crate::api::{
     },
     shared_resources::entry::DATA_DIR,
 };
+
+use super::entry::STORAGE;
 
 #[serde_with::serde_as]
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
@@ -49,7 +52,7 @@ const COLLECTION_BASE: &str = "collections";
 /// if a method has `&mut self`, remember to call `self.save()` to actually save it!
 impl Collection {
     /// Creates a collection and return a collection with its loader attached
-    pub fn create(
+    pub async fn create(
         display_name: String,
         version_metadata: VersionMetadata,
         mod_loader: Option<ModLoader>,
@@ -60,6 +63,7 @@ impl Collection {
         let entry_path = loader.base_path.clone();
         let mod_manager = ModManager::new(
             entry_path.join("minecraft_root"),
+            entry_path.join("mod_images"),
             mod_loader.clone(),
             version_metadata.clone(),
         );
@@ -77,7 +81,7 @@ impl Collection {
             launch_args: None,
         };
 
-        collection.save()?;
+        collection.save().await?;
 
         Ok(collection)
     }
@@ -94,7 +98,7 @@ impl Collection {
         self.mod_manager
             .add_project(project.into(), tag, mod_override.unwrap_or(Vec::new()))
             .await?;
-        self.save()?;
+        self.save().await?;
         Ok(())
     }
 
@@ -112,7 +116,7 @@ impl Collection {
                 mod_override.unwrap_or(Vec::new()),
             )
             .await?;
-        self.save()?;
+        self.save().await?;
         Ok(())
     }
     pub async fn add_curseforge_mod(
@@ -125,7 +129,7 @@ impl Collection {
         self.mod_manager
             .add_project(project.into(), tag, mod_override.unwrap_or(Vec::new()))
             .await?;
-        self.save()?;
+        self.save().await?;
         Ok(())
     }
 
@@ -146,7 +150,7 @@ impl Collection {
     pub async fn launch_game(&mut self) -> anyhow::Result<()> {
         if self.launch_args.is_none() {
             self.launch_args = Some(self.verify_and_download_game().await?);
-            self.save()?;
+            self.save().await?;
         }
         vanilla::launcher::launch_game(&self.launch_args.as_ref().unwrap()).await
     }
@@ -181,7 +185,6 @@ impl Collection {
     }
 
     pub fn get_collection_id(&self) -> CollectionId {
-        dbg!(&self.entry_path);
         CollectionId(
             self.entry_path
                 .file_name()
@@ -191,12 +194,18 @@ impl Collection {
         )
     }
 
-    pub fn save(&self) -> anyhow::Result<()> {
+    pub async fn save(&self) -> anyhow::Result<()> {
         StorageLoader::new(
             COLLECTION_FILE_NAME.to_string(),
             Cow::Borrowed(&self.entry_path),
         )
-        .save(&self)
+        .save(&self)?;
+        {
+            let mut binding = STORAGE.collections.write().await;
+            *binding = Self::scan()?;
+        }
+        // dbg!(&*STORAGE.collections.read().await);
+        Ok(())
     }
 
     fn create_loader(display_name: &str) -> std::io::Result<StorageLoader> {

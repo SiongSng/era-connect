@@ -7,7 +7,7 @@ use super::storage_loader::{StorageInstance, StorageLoader};
 
 const GLOBAL_SETTINGS_FILENAME: &str = "global_setings.json";
 
-#[derive(Serialize, Deserialize, Default, Clone, Debug)]
+#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
 pub struct GlobalSettings {
     pub appearances: Appearances,
     pub ui_layout: UILayout,
@@ -26,7 +26,7 @@ impl StorageInstance<Self> for GlobalSettings {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct Download {
     pub max_simultatneous_download: usize,
@@ -42,7 +42,7 @@ impl Default for Download {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub enum Speed {
     MegabytePerSecond(f64),
     MebibytePerSecond(f64),
@@ -68,7 +68,7 @@ impl Default for Speed {
     }
 }
 
-#[derive(Serialize, Deserialize, Default, Clone, Debug)]
+#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
 pub struct Appearances {
     pub dark_lightmode: DarkLightMode,
     pub day_light_darkmode: bool,
@@ -81,14 +81,14 @@ pub struct Appearances {
     pub animation: bool,
 }
 
-#[derive(Serialize, Deserialize, Default, Clone, Debug)]
+#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
 pub enum DarkLightMode {
     #[default]
     Dark,
     Light,
 }
 
-#[derive(Serialize, Deserialize, Default, Clone, Debug, VariantStruct)]
+#[derive(Serialize, Deserialize, Default, Clone, Debug, VariantStruct, PartialEq)]
 #[serde(default)]
 pub struct UILayout {
     pub completed_setup: bool,

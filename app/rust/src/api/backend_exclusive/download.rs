@@ -91,8 +91,8 @@ async fn chunked_download(
     Ok(bytes.freeze())
 }
 
-pub fn extract_filename(url: &str) -> anyhow::Result<String> {
-    let parsed_url = Url::parse(url)?;
+pub fn extract_filename(url: impl AsRef<str> + Send + Sync) -> anyhow::Result<String> {
+    let parsed_url = Url::parse(url.as_ref())?;
     let path_segments = parsed_url.path_segments().context("Invalid URL")?;
     let filename = path_segments.last().context("No filename found in URL")?;
     Ok(filename.to_owned())
@@ -142,7 +142,7 @@ pub async fn get_hash(file_path: impl AsRef<Path> + Send + Sync) -> anyhow::Resu
     Ok(vec)
 }
 
-#[derive(Clone, Debug)]
+#[derive(PartialEq, Clone, Debug)]
 pub struct Progress {
     pub name: Arc<str>,
     pub percentages: f64,
@@ -172,7 +172,7 @@ impl Default for Progress {
 /// example:
 /// start: 30.0
 /// end: 100.0
-#[derive(Clone, Copy, Debug)]
+#[derive(PartialEq, Clone, Copy, Debug)]
 pub struct DownloadBias {
     pub start: f64,
     pub end: f64,
@@ -271,7 +271,7 @@ pub async fn rolling_average(
 
             let average_speed = average_speed.iter().sum::<f64>() / average_speed.len() as f64;
 
-            let global_settings = STORAGE.global_settings.read().await;
+            let global_settings = &STORAGE.global_settings.read().await;
             let speed_limit = global_settings.download.download_speed_limit.as_ref();
 
             Progress {
