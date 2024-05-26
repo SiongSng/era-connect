@@ -260,37 +260,17 @@ pub async fn minecraft_login_flow(skin: UnboundedSender<LoginFlowEvent>) -> anyh
 pub async fn create_collection(
     display_name: impl Into<String>,
     version_metadata: VersionMetadata,
-    mod_loader: Option<ModLoader>,
-    advanced_options: Option<AdvancedOptions>,
-) -> anyhow::Result<()> {
+    mod_loader: impl Into<Option<ModLoader>>,
+    advanced_options: impl Into<Option<AdvancedOptions>>,
+) -> anyhow::Result<Collection> {
     let display_name = display_name.into();
-    let mod_loader = Some(ModLoader {
-        mod_loader_type: ModLoaderType::Fabric,
-        version: None,
-    });
-    let version_metadata = get_versions()
-        .await?
-        .into_iter()
-        .find(|x| x.id == "1.20.2")
-        .unwrap();
-    let mut collection =
-        Collection::create(display_name, version_metadata, mod_loader, advanced_options).await?;
-
-    collection
-        .add_multiple_modrinth_mod(
-            vec![
-                "fabric-api",
-                "sodium",
-                "modmenu",
-                "ferrite-core",
-                "lazydfu",
-                "iris",
-                "indium",
-            ],
-            vec![],
-            Some(vec![ModOverride::IgnoreMinorGameVersion]),
-        )
-        .await?;
+    let mut collection = Collection::create(
+        display_name,
+        version_metadata,
+        mod_loader.into(),
+        advanced_options.into(),
+    )
+    .await?;
 
     info!(
         "Successfully created collection basic file at {}",
@@ -301,18 +281,9 @@ pub async fn create_collection(
     collection.verify_and_download_game().await?;
     collection.download_mods().await?;
 
-    let (tx, mut rx) = unbounded_channel();
-    let download_handle = DOWNLOAD_PROGRESS.get_continuous_progress_handle(&collection, tx);
-
-    while let Some(x) = rx.recv().await {
-        info!("{:#?}", x);
-    }
-
     // dbg!(&collection.mod_manager.mods);
 
     info!("Successfully finished downloading game");
 
-    download_handle.await??;
-
-    Ok(())
+    Ok(collection)
 }

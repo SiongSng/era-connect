@@ -16,6 +16,7 @@ use std::cmp::Reverse;
 use std::fs::create_dir_all;
 use std::path::Path;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -48,8 +49,8 @@ pub struct ModMetadata {
     pub tag: Vec<Tag>,
     pub overrides: Vec<ModOverride>,
     pub incompatiable_mods: Option<Vec<ModMetadata>>,
+    pub icon_url: Option<Url>,
     icon_directory: PathBuf,
-    icon_url: Option<Url>,
     mod_data: RawModData,
 }
 
@@ -474,7 +475,10 @@ impl ModManager {
                 ..
             } => {
                 let project = FURSE.get_mod(minecraft_mod.mod_id).await?;
-                let icon_url = project.logo.map(|x| x.thumbnail_url);
+                let icon_url = project
+                    .logo
+                    .map(|x| Url::parse(&x.thumbnail_url))
+                    .transpose()?;
                 ModMetadata {
                     name: project.name,
                     project_id: ProjectId::Curseforge(minecraft_mod.mod_id),

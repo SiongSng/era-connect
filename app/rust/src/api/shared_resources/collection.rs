@@ -106,14 +106,14 @@ impl Collection {
         &mut self,
         project_ids: Vec<&str>,
         tag: Vec<Tag>,
-        mod_override: Option<Vec<ModOverride>>,
+        mod_override: impl Into<Option<Vec<ModOverride>>>,
     ) -> anyhow::Result<()> {
         let project = (&FERINTH).get_multiple_projects(&project_ids).await?;
         self.mod_manager
             .add_multiple_project(
                 project.into_iter().map(|x| x.into()).collect::<Vec<_>>(),
                 tag.clone(),
-                mod_override.unwrap_or(Vec::new()),
+                mod_override.into().unwrap_or(Vec::new()),
             )
             .await?;
         self.save().await?;
@@ -290,6 +290,15 @@ pub struct ModLoader {
     #[serde(rename = "type")]
     pub mod_loader_type: ModLoaderType,
     pub version: Option<String>,
+}
+
+impl ModLoader {
+    pub fn new(mod_loader_type: ModLoaderType, version: impl Into<Option<String>>) -> Self {
+        Self {
+            mod_loader_type,
+            version: version.into(),
+        }
+    }
 }
 
 impl ToString for ModLoader {
