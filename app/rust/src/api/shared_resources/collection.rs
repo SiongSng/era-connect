@@ -14,7 +14,6 @@ use crate::api::{
         download::{execute_and_progress, DownloadBias},
         mod_management::mods::{ModManager, ModOverride, Tag, FERINTH, FURSE},
         modding::forge::mod_loader_download,
-        storage::storage_loader::StorageInstance,
         vanilla::{
             self,
             launcher::{full_vanilla_download, LaunchArgs},
@@ -229,10 +228,21 @@ impl Collection {
         )
         .save(&self)?;
         {
-            let mut binding = STORAGE.collections.write().await;
-            *binding = Self::scan()?;
+            let binding = &mut STORAGE.write().collections;
+            if let Some(x) = binding
+                .iter_mut()
+                .filter(|x| x.get_collection_id() == self.get_collection_id())
+                .find(|x| &**x != self)
+            {
+                *x = self.clone();
+            }
+            if binding
+                .iter()
+                .all(|x| x.get_collection_id() != self.get_collection_id())
+            {
+                binding.push(self.clone());
+            }
         }
-        // dbg!(&*STORAGE.collections.read().await);
         Ok(())
     }
 

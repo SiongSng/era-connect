@@ -11,6 +11,7 @@ use std::{
 
 use anyhow::{bail, Context};
 use bytes::{BufMut, Bytes, BytesMut};
+use dioxus::prelude::spawn;
 use futures::{future::BoxFuture, StreamExt};
 use log::{debug, error};
 use reqwest::Url;
@@ -181,7 +182,7 @@ impl Default for DownloadBias {
     fn default() -> Self {
         Self {
             start: 0.0,
-            end: 100.0,
+            end: 100.,
         }
     }
 }
@@ -199,15 +200,15 @@ pub async fn execute_and_progress(
     let download_complete = Arc::new(AtomicBool::new(false));
     let arc_id = Arc::new(id);
 
-    let download = &STORAGE.global_settings.read().await.download;
+    let download = STORAGE().global_settings.download;
     let max_simultaenous_download = download.max_simultatneous_download;
 
     let download_complete_clone = Arc::clone(&download_complete);
     let current_size_clone = Arc::clone(&download_args.current);
     let total_size_clone = Arc::clone(&download_args.total);
     let id_clone = Arc::clone(&arc_id);
-    let output = tokio::spawn(async move {
-        rolling_average(
+    spawn(async move {
+        let x = rolling_average(
             name,
             download_complete_clone,
             current_size_clone,
@@ -216,17 +217,12 @@ pub async fn execute_and_progress(
             bias,
             calculate_speed,
         )
-        .await
+        .await;
+        DOWNLOAD_PROGRESS().insert(Arc::clone(&arc_id), x);
     });
 
     join_futures(handles, max_simultaenous_download).await?;
     download_complete.store(true, Ordering::Release);
-    let progress = output.await?;
-
-    DOWNLOAD_PROGRESS
-        .insert(Arc::clone(&arc_id), progress)
-        .await?;
-    DOWNLOAD_PROGRESS.remove(arc_id).await?;
 
     debug!("finish download request");
 
@@ -243,7 +239,7 @@ pub async fn rolling_average(
     calculate_speed: bool,
 ) -> Progress {
     let mut instant = Instant::now();
-    let mut prev_bytes = 0.0;
+    let mut prev_bytes = 0.;
     let mut completed = false;
     let m_progress;
     let sleep_time = 250;
@@ -271,7 +267,7 @@ pub async fn rolling_average(
 
             let average_speed = average_speed.iter().sum::<f64>() / average_speed.len() as f64;
 
-            let global_settings = &STORAGE.global_settings.read().await;
+            let global_settings = STORAGE().global_settings;
             let speed_limit = global_settings.download.download_speed_limit.as_ref();
 
             Progress {
@@ -303,10 +299,7 @@ pub async fn rolling_average(
         } else {
             prev_bytes = current;
             instant = Instant::now();
-            DOWNLOAD_PROGRESS
-                .insert(Arc::clone(&id), progress)
-                .await
-                .unwrap();
+            DOWNLOAD_PROGRESS.write().insert(Arc::clone(&id), progress);
         }
     }
     m_progress
