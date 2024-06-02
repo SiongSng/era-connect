@@ -31,7 +31,7 @@ use super::entry::STORAGE;
 pub struct Collection {
     pub display_name: String,
     pub minecraft_version: VersionMetadata,
-    pub mod_loader: Option<ModLoader>,
+    pub mod_controller: Option<ModController>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     #[serde_as(as = "serde_with::DurationSeconds<i64>")]
@@ -39,8 +39,25 @@ pub struct Collection {
     pub advanced_options: Option<AdvancedOptions>,
 
     pub entry_path: PathBuf,
-    pub mod_manager: ModManager,
     launch_args: Option<LaunchArgs>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+pub struct ModController {
+    pub loader: ModLoader,
+    pub manager: ModManager,
+}
+
+impl ModController {
+    pub async fn finished_downloading(&self) -> bool {
+        self.manager.all_downloaded().await
+    }
+}
+
+impl ModController {
+    pub fn new(loader: ModLoader, manager: ModManager) -> Self {
+        Self { loader, manager }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default, Eq, PartialEq, Hash)]
@@ -61,23 +78,25 @@ impl Collection {
         let now_time = Utc::now();
         let loader = Self::create_loader(&display_name)?;
         let entry_path = loader.base_path.clone();
-        let mod_manager = ModManager::new(
-            entry_path.join("minecraft_root"),
-            entry_path.join("mod_images"),
-            mod_loader.clone(),
-            version_metadata.clone(),
-        );
+        let mod_controller = mod_loader.map(|loader| {
+            let mod_manager = ModManager::new(
+                entry_path.join("minecraft_root"),
+                entry_path.join("mod_images"),
+                loader.clone(),
+                version_metadata.clone(),
+            );
+            ModController::new(loader, mod_manager)
+        });
 
         let collection = Collection {
             display_name,
             minecraft_version: version_metadata,
-            mod_loader,
+            mod_controller,
             created_at: now_time,
             updated_at: now_time,
             played_time: Duration::seconds(0),
             advanced_options,
             entry_path,
-            mod_manager,
             launch_args: None,
         };
 
@@ -95,9 +114,11 @@ impl Collection {
     ) -> anyhow::Result<()> {
         let project_id = project_id.as_ref();
         let project = (&FERINTH).get_project(project_id).await?;
-        self.mod_manager
-            .add_project(project.into(), tag, mod_override.unwrap_or(Vec::new()))
-            .await?;
+        if let Some(manager) = self.mod_manager_mut() {
+            manager
+                .add_project(project.into(), tag, mod_override.unwrap_or(Vec::new()))
+                .await?;
+        }
         self.save().await?;
         Ok(())
     }
@@ -109,13 +130,16 @@ impl Collection {
         mod_override: impl Into<Option<Vec<ModOverride>>>,
     ) -> anyhow::Result<()> {
         let project = (&FERINTH).get_multiple_projects(&project_ids).await?;
-        self.mod_manager
-            .add_multiple_project(
-                project.into_iter().map(|x| x.into()).collect::<Vec<_>>(),
-                tag.clone(),
-                mod_override.into().unwrap_or(Vec::new()),
-            )
-            .await?;
+        if let Some(mod_controller) = self.mod_controller.as_mut() {
+            mod_controller
+                .manager
+                .add_multiple_project(
+                    project.into_iter().map(|x| x.into()).collect::<Vec<_>>(),
+                    tag.clone(),
+                    mod_override.into().unwrap_or(Vec::new()),
+                )
+                .await?;
+        }
         self.save().await?;
         Ok(())
     }
@@ -126,23 +150,27 @@ impl Collection {
         mod_override: Option<Vec<ModOverride>>,
     ) -> anyhow::Result<()> {
         let project = (&FURSE).get_mod(project_id).await?;
-        self.mod_manager
-            .add_project(project.into(), tag, mod_override.unwrap_or(Vec::new()))
-            .await?;
+        if let Some(mod_manager) = self.mod_manager_mut() {
+            mod_manager
+                .add_project(project.into(), tag, mod_override.unwrap_or(Vec::new()))
+                .await?;
+        }
         self.save().await?;
         Ok(())
     }
 
     pub async fn download_mods(&self) -> anyhow::Result<()> {
         let id = self.get_collection_id();
-        let download_args = self.mod_manager.get_download()?;
-        execute_and_progress(
-            id,
-            download_args,
-            DownloadBias::default(),
-            String::from("Mods downloading"),
-        )
-        .await?;
+        if let Some(mod_manager) = self.mod_manager() {
+            let download_args = mod_manager.get_download()?;
+            execute_and_progress(
+                id,
+                download_args,
+                DownloadBias::default(),
+                String::from("Mods downloading"),
+            )
+            .await?;
+        }
         Ok(())
     }
 
@@ -161,8 +189,8 @@ impl Collection {
 
     /// Downloads game(also verifies)
     pub async fn verify_and_download_game(&self) -> anyhow::Result<LaunchArgs> {
-        let mod_loader_clone = self.mod_loader.clone();
-        let p = if let Some(mod_loader) = mod_loader_clone {
+        let mod_loader = self.mod_loader();
+        let p = if let Some(mod_loader) = mod_loader {
             match mod_loader.mod_loader_type {
                 ModLoaderType::Forge
                 | ModLoaderType::NeoForge
@@ -206,6 +234,19 @@ impl Collection {
         }
         // dbg!(&*STORAGE.collections.read().await);
         Ok(())
+    }
+
+    pub fn mod_loader(&self) -> Option<&ModLoader> {
+        self.mod_controller.as_ref().map(|x| &x.loader)
+    }
+    pub fn mod_manager(&self) -> Option<&ModManager> {
+        self.mod_controller.as_ref().map(|x| &x.manager)
+    }
+    pub fn mod_loader_mut(&mut self) -> Option<&mut ModLoader> {
+        self.mod_controller.as_mut().map(|x| &mut x.loader)
+    }
+    pub fn mod_manager_mut(&mut self) -> Option<&mut ModManager> {
+        self.mod_controller.as_mut().map(|x| &mut x.manager)
     }
 
     fn create_loader(display_name: &str) -> std::io::Result<StorageLoader> {

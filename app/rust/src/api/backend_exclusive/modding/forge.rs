@@ -435,7 +435,7 @@ pub async fn mod_loader_download(collection: &Collection) -> anyhow::Result<Laun
         end: 90.0,
     };
     let (modloader_download_args, modloader_arguments, manifest) = prepare_modloader_download(
-        &collection.mod_loader.as_ref().unwrap().mod_loader_type,
+        &collection.mod_loader().unwrap().mod_loader_type,
         vanilla_arguments.launch_args,
         vanilla_arguments.jvm_args,
         vanilla_arguments.game_args,

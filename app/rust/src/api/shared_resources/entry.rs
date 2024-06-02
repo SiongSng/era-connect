@@ -93,21 +93,41 @@ impl DownloadProgress {
         .await
     }
 
+    pub async fn get_all_continous_handle(
+        &'static self,
+    ) -> anyhow::Result<Vec<UnboundedReceiver<Arc<Progress>>>> {
+        tokio_stream::iter(
+            STORAGE
+                .collections
+                .read()
+                .await
+                .iter()
+                .map(Collection::get_collection_id),
+        )
+        .then(|x| async move {
+            let (tx, rx) = unbounded_channel();
+            self.get_continuous_progress_handle(x, tx).await??;
+            Ok(rx)
+        })
+        .collect::<anyhow::Result<Vec<_>>>()
+        .await
+    }
+
     pub fn get_continuous_progress_handle(
         &'static self,
-        collection: &Collection,
-        sender: UnboundedSender<String>,
+        collection_id: CollectionId,
+        sender: UnboundedSender<Arc<Progress>>,
     ) -> flutter_rust_bridge::JoinHandle<Result<(), anyhow::Error>> {
-        let id = Arc::new(collection.get_collection_id());
+        let id = Arc::new(collection_id);
         tokio::spawn(async move {
             loop {
                 if let Some(x) = self.get(Arc::clone(&id)).await? {
                     if x.percentages >= 100.0 {
                         break;
                     }
-                    sender.send(format!("{:#?}", x))?;
+                    sender.send(x)?;
                 }
-                tokio::time::sleep(Duration::from_millis(500)).await;
+                tokio::time::sleep(Duration::from_millis(300)).await;
             }
             Ok::<(), anyhow::Error>(())
         })

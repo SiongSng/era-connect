@@ -4,7 +4,6 @@ use ferinth::structures::search::Sort;
 use ferinth::structures::version::DependencyType;
 use furse::structures::file_structs::FileRelationType;
 use furse::structures::file_structs::HashAlgo;
-use furse::structures::mod_structs::ModAsset;
 use futures::StreamExt;
 use log::debug;
 use once_cell::sync::Lazy;
@@ -16,7 +15,6 @@ use std::cmp::Reverse;
 use std::fs::create_dir_all;
 use std::path::Path;
 use std::path::PathBuf;
-use std::str::FromStr;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -63,6 +61,49 @@ impl ModMetadata {
                 extract_filename(icon.to_string()).unwrap()
             ))
         })
+    }
+
+    pub async fn icon_downloaded(&self) -> Option<bool> {
+        if let Some(path) = self.get_icon_path() {
+            Some(path.exists())
+        } else {
+            None
+        }
+    }
+
+    /// game_directory is from `collection.game_directory`
+    pub async fn mod_is_downloaded(&self, game_directory: impl AsRef<Path>) -> bool {
+        let base_path = game_directory.as_ref().join("mods");
+        let base_path = base_path.as_path();
+        match &self.mod_data {
+            RawModData::Modrinth(x) => {
+                tokio_stream::iter(x.files.iter())
+                    .all(|file| async move {
+                        let hash = &file.hashes.sha1;
+                        let filename = &file.filename;
+                        let path = base_path.join(filename);
+                        validate_sha1(&path, hash).await.is_ok()
+                    })
+                    .await
+            }
+            RawModData::Curseforge { data: file, .. } => {
+                let hashes = file
+                    .hashes
+                    .iter()
+                    .filter(|x| x.algo == HashAlgo::Sha1)
+                    .map(|x| x.value.as_ref())
+                    .collect::<Vec<_>>();
+                let url = file.download_url.as_ref();
+                if url.is_some() {
+                    let filename = &file.file_name;
+                    let path = base_path.join(filename);
+                    hashes_validate(path, &hashes).await
+                } else {
+                    // FIXME: returns true for non
+                    true
+                }
+            }
+        }
     }
 }
 
@@ -158,7 +199,7 @@ pub struct ModManager {
 
     game_directory: PathBuf,
     icon_directory: PathBuf,
-    mod_loader: Option<ModLoader>,
+    mod_loader: ModLoader,
     target_game_version: VersionMetadata,
 }
 
@@ -178,7 +219,7 @@ impl ModManager {
     pub fn new(
         game_directory: PathBuf,
         icon_directory: PathBuf,
-        mod_loader: Option<ModLoader>,
+        mod_loader: ModLoader,
         target_game_version: VersionMetadata,
     ) -> Self {
         Self {
@@ -190,6 +231,13 @@ impl ModManager {
             icon_directory,
         }
     }
+
+    pub async fn all_downloaded(&self) -> bool {
+        tokio_stream::iter(self.mods.iter())
+            .all(|minecraft_mod| minecraft_mod.mod_is_downloaded(&self.game_directory))
+            .await
+    }
+
     pub fn get_download(&self) -> anyhow::Result<DownloadArgs> {
         let current_size = Arc::new(AtomicUsize::new(0));
         let total_size = Arc::new(AtomicUsize::new(0));
@@ -383,9 +431,7 @@ impl ModManager {
         } else {
             self.mod_dependencies_resolve(&mod_metadata.mod_data, mod_override)
                 .await?;
-            if self.mod_loader.as_ref().map(|x| x.mod_loader_type) == Some(ModLoaderType::Quilt)
-                && is_fabric_api
-            {
+            if self.mod_loader.mod_loader_type == ModLoaderType::Quilt && is_fabric_api {
                 let project = (&FERINTH).get_project("qsl").await?;
                 self.add_project(project.into(), vec![Tag::Dependencies], vec![])
                     .await?;
@@ -429,9 +475,7 @@ impl ModManager {
             if !self.mods.contains(&mod_metadata) {
                 self.mod_dependencies_resolve(&mod_metadata.mod_data, mod_override.clone())
                     .await?;
-                if self.mod_loader.as_ref().map(|x| x.mod_loader_type) == Some(ModLoaderType::Quilt)
-                    && is_fabric_api
-                {
+                if self.mod_loader.mod_loader_type == ModLoaderType::Quilt && is_fabric_api {
                     let project = (&FERINTH).get_project("qsl").await?;
                     self.add_project(project.into(), vec![Tag::Dependencies], vec![])
                         .await?;
@@ -501,10 +545,7 @@ impl ModManager {
         &self,
         query: &str,
     ) -> anyhow::Result<ModrinthSearchResponse> {
-        let mod_loader = self
-            .mod_loader
-            .as_ref()
-            .with_context(|| "don't add mods in vanilla")?;
+        let mod_loader = &self.mod_loader;
         let mod_loader_facet = Facet::Categories(mod_loader.to_string());
         let version_facet = Facet::Versions(self.target_game_version.id.to_string());
         let search_hits = FERINTH
@@ -541,11 +582,7 @@ impl ModManager {
 
         let versions = get_mod_version(project).await?;
 
-        let collection_mod_loader = self
-            .mod_loader
-            .as_ref()
-            .with_context(|| "don't add mod in vanilla")?
-            .mod_loader_type;
+        let collection_mod_loader = self.mod_loader.mod_loader_type;
 
         let collection_game_version = all_game_version
             .iter()
@@ -600,7 +637,6 @@ impl ModManager {
             let collection_mod_loader = self
                 .mod_loader
                 .clone()
-                .with_context(|| "don't add mod in vanilla")?
                 .mod_loader_type;
 
             let collection_game_version = all_game_version
@@ -835,13 +871,10 @@ fn minor_game_check(version: &&VersionMetadata, game_id: &str) -> bool {
     }
 }
 async fn hashes_validate(path: impl AsRef<Path>, vec: &[&str]) -> bool {
-    for p in vec {
-        let is_ok = validate_sha1(path.as_ref(), p).await.is_ok();
-        if is_ok {
-            return true;
-        }
-    }
-    false
+    let path = path.as_ref();
+    tokio_stream::iter(vec)
+        .any(|x| async move { validate_sha1(path, x).await.is_ok() })
+        .await
 }
 
 /// `IgnoreMinorGameVersion` will behave like `IgnoreAllGameVersion` if operated on snapshots.
