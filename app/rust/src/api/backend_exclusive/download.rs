@@ -11,13 +11,14 @@ use std::{
 
 use anyhow::{bail, Context};
 use bytes::{BufMut, Bytes, BytesMut};
-use dioxus::prelude::spawn;
+use dioxus::{prelude::spawn, signals::Readable};
 use futures::{future::BoxFuture, StreamExt};
 use log::{debug, error};
 use reqwest::Url;
 use tokio::{
     fs::File,
     io::{AsyncReadExt, BufReader},
+    sync::mpsc::{unbounded_channel, UnboundedSender},
     time::{self, Instant},
 };
 
@@ -26,7 +27,7 @@ use crate::api::shared_resources::{
     entry::{DOWNLOAD_PROGRESS, STORAGE},
 };
 
-pub type HandlesType<'a> = Vec<BoxFuture<'a, anyhow::Result<()>>>;
+pub type HandlesType<'a, Out = anyhow::Result<()>> = Vec<BoxFuture<'a, Out>>;
 
 pub async fn download_file(
     url: impl AsRef<str> + Send + Sync,
@@ -143,7 +144,7 @@ pub async fn get_hash(file_path: impl AsRef<Path> + Send + Sync) -> anyhow::Resu
     Ok(vec)
 }
 
-#[derive(PartialEq, Clone, Debug)]
+#[derive(PartialEq, Clone, Debug, PartialOrd)]
 pub struct Progress {
     pub name: Arc<str>,
     pub percentages: f64,
@@ -151,6 +152,27 @@ pub struct Progress {
     pub current_size: Option<f64>,
     pub total_size: Option<f64>,
     pub bias: DownloadBias,
+}
+
+impl Progress {
+    pub fn finished(&self) -> bool {
+        self.percentages >= self.bias.end || self.current_size >= self.total_size
+    }
+}
+
+#[derive(PartialEq, Eq, Clone, Debug, Hash, PartialOrd, Ord)]
+pub struct DownloadId {
+    pub collection_id: CollectionId,
+    pub name: Arc<str>,
+}
+
+impl DownloadId {
+    pub fn from_progress(id: CollectionId, progress: &Progress) -> DownloadId {
+        DownloadId {
+            collection_id: id,
+            name: progress.name.clone(),
+        }
+    }
 }
 
 impl Default for Progress {
@@ -173,7 +195,7 @@ impl Default for Progress {
 /// example:
 /// start: 30.0
 /// end: 100.0
-#[derive(PartialEq, Clone, Copy, Debug)]
+#[derive(PartialEq, Clone, Copy, Debug, PartialOrd)]
 pub struct DownloadBias {
     pub start: f64,
     pub end: f64,
@@ -198,27 +220,30 @@ pub async fn execute_and_progress(
     let handles = download_args.handles;
     let calculate_speed = download_args.is_size;
     let download_complete = Arc::new(AtomicBool::new(false));
-    let arc_id = Arc::new(id);
 
-    let download = STORAGE().global_settings.download;
+    let download = &STORAGE.read().global_settings.download;
     let max_simultaenous_download = download.max_simultatneous_download;
 
     let download_complete_clone = Arc::clone(&download_complete);
     let current_size_clone = Arc::clone(&download_args.current);
     let total_size_clone = Arc::clone(&download_args.total);
-    let id_clone = Arc::clone(&arc_id);
+
+    let (tx, mut rx) = unbounded_channel();
+    spawn(rolling_average(
+        name,
+        download_complete_clone,
+        current_size_clone,
+        total_size_clone,
+        id.clone(),
+        bias,
+        calculate_speed,
+        tx,
+    ));
+
     spawn(async move {
-        let x = rolling_average(
-            name,
-            download_complete_clone,
-            current_size_clone,
-            total_size_clone,
-            id_clone,
-            bias,
-            calculate_speed,
-        )
-        .await;
-        DOWNLOAD_PROGRESS().insert(Arc::clone(&arc_id), x);
+        while let Some((download_id, x)) = rx.recv().await {
+            DOWNLOAD_PROGRESS.write().insert(download_id, x);
+        }
     });
 
     join_futures(handles, max_simultaenous_download).await?;
@@ -234,23 +259,23 @@ pub async fn rolling_average(
     download_complete: Arc<AtomicBool>,
     current: Arc<AtomicUsize>,
     total: Arc<AtomicUsize>,
-    id: Arc<CollectionId>,
+    id: CollectionId,
     bias: DownloadBias,
     calculate_speed: bool,
-) -> Progress {
+    sender: UnboundedSender<(DownloadId, Progress)>,
+) {
     let mut instant = Instant::now();
     let mut prev_bytes = 0.;
     let mut completed = false;
-    let m_progress;
     let sleep_time = 250;
     let rolling_average_window = 5000 / sleep_time; // 5000/250 = 20
     let mut average_speed = VecDeque::with_capacity(rolling_average_window);
     let name = name.into();
     loop {
+        time::sleep(Duration::from_millis(250)).await;
         let name = name.clone();
         let multiplier = bias.end - bias.start;
 
-        time::sleep(Duration::from_millis(sleep_time.try_into().unwrap())).await;
         let current = current.load(Ordering::Relaxed) as f64;
         let total = total.load(Ordering::Relaxed) as f64;
         let percentages = (current / total).mul_add(multiplier, bias.start);
@@ -266,9 +291,8 @@ pub async fn rolling_average(
             }
 
             let average_speed = average_speed.iter().sum::<f64>() / average_speed.len() as f64;
-
-            let global_settings = STORAGE().global_settings;
-            let speed_limit = global_settings.download.download_speed_limit.as_ref();
+            // let global_settings = STORAGE().global_settings;
+            // let speed_limit = global_settings.download.download_speed_limit.as_ref();
 
             Progress {
                 name,
@@ -293,16 +317,17 @@ pub async fn rolling_average(
             if !completed {
                 completed = true;
             } else {
-                m_progress = progress;
+                let download_id = DownloadId::from_progress(id.clone(), &progress);
+                sender.send((download_id, progress)).unwrap();
                 break;
             }
         } else {
             prev_bytes = current;
             instant = Instant::now();
-            DOWNLOAD_PROGRESS.write().insert(Arc::clone(&id), progress);
+            let download_id = DownloadId::from_progress(id.clone(), &progress);
+            sender.send((download_id, progress)).unwrap();
         }
     }
-    m_progress
 }
 
 pub async fn join_futures(

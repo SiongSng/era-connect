@@ -1,5 +1,6 @@
 use anyhow::bail;
 use anyhow::{Context, Result};
+use dioxus::signals::Readable;
 use log::{error, info};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -375,7 +376,7 @@ async fn setup_game_option(
     asset_index_id: String,
     game_flags: GameFlagsUnprocessed,
 ) -> Result<(GameOptions, GameFlagsProcessed), anyhow::Error> {
-    let storage = STORAGE().account_storage;
+    let storage = &STORAGE.read().account_storage;
     let uuid = storage
         .main_account
         .context("Can't launch game without main account")?;

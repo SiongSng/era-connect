@@ -1,9 +1,9 @@
 use anyhow::Context;
-use dioxus::signals::GlobalSignal;
+use dioxus::signals::{GlobalSignal, Writable};
 use flutter_rust_bridge::setup_default_user_utils;
 use log::{info, warn};
 use once_cell::sync::Lazy;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::create_dir_all;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -16,7 +16,7 @@ pub use crate::api::backend_exclusive::storage::{
 use uuid::Uuid;
 
 use crate::api::backend_exclusive::{
-    download::Progress,
+    download::{DownloadId, Progress},
     storage::{storage_loader::StorageInstance, storage_state::StorageState},
 };
 use crate::api::shared_resources::authentication::msa_flow::LoginFlowEvent;
@@ -37,71 +37,21 @@ pub static DATA_DIR: Lazy<PathBuf> = Lazy::new(|| {
 
 pub static STORAGE: GlobalSignal<StorageState> = GlobalSignal::new(StorageState::new);
 
-/// A globally accessible sender for updating download progress, utilizing an unbounded channel for asynchronous message passing.
-///
-/// This static variable enables various parts of an application to send updates about download progress or request data
-/// regarding current progress states. It leverages `HashMapMessage` to perform actions like insertions, removals, and queries
-/// against a hashmap that tracks the progress of each download uniquely identified by `CollectionId`.
-/// # Examples
-/// ```rust
-///     let (tx, mut rx) = unbounded_channel();
-///     DOWNLOAD_PROGRESS.send(HashMapMessage::Get(Arc::clone(&id), tx))?;
-///     if let Some(Some(x)) = rx.recv().await {
-///         debug!("{:#?}", x);
-///     }
-/// ```
 pub static DOWNLOAD_PROGRESS: GlobalSignal<DownloadProgress> =
     GlobalSignal::new(DownloadProgress::new);
 
 #[derive(PartialEq, Clone, derive_more::Deref, derive_more::DerefMut)]
-pub struct DownloadProgress(pub HashMap<Arc<CollectionId>, Progress>);
+pub struct DownloadProgress(pub BTreeMap<DownloadId, Progress>);
 
 impl DownloadProgress {
     fn new() -> Self {
-        Self(HashMap::new())
+        Self(BTreeMap::new())
     }
 
-    pub async fn get_all(self) -> Vec<Progress> {
+    pub fn get_all(self) -> Vec<Progress> {
+        // self.0.into_iter().collect::<BTreeMap<_, _>>();
         self.0.into_values().collect()
     }
-
-    // pub async fn get_all_continous_handle(
-    //     &'static self,
-    // ) -> anyhow::Result<Vec<UnboundedReceiver<Arc<Progress>>>> {
-    //     tokio_stream::iter(
-    //         STORAGE()
-    //             .collections
-    //             .iter()
-    //             .map(Collection::get_collection_id),
-    //     )
-    //     .then(|x| async move {
-    //         let (tx, rx) = unbounded_channel();
-    //         self.get_continuous_progress_handle(x, tx).await??;
-    //         Ok(rx)
-    //     })
-    //     .collect::<anyhow::Result<Vec<_>>>()
-    //     .await
-    // }
-
-    // pub fn get_continuous_progress_handle(
-    //     &'static self,
-    //     collection_id: CollectionId,
-    //     sender: UnboundedSender<Arc<Progress>>,
-    // ) -> flutter_rust_bridge::JoinHandle<Result<(), anyhow::Error>> {
-    //     let id = Arc::new(collection_id);
-    //     tokio::spawn(async move {
-    //         loop {
-    //             if let Some(x) = self.get(&id) {
-    //                 if x.percentages >= 100.0 {
-    //                     break;
-    //                 }
-    //                 sender.send(x)?;
-    //             }
-    //             tokio::time::sleep(Duration::from_millis(300)).await;
-    //         }
-    //         Ok::<(), anyhow::Error>(())
-    //     })
-    // }
 }
 
 pub fn init_app() -> anyhow::Result<()> {
@@ -202,10 +152,11 @@ pub async fn create_collection(
     advanced_options: impl Into<Option<AdvancedOptions>>,
 ) -> anyhow::Result<Collection> {
     let display_name = display_name.into();
-    let mut collection = Collection::create(
+    let collection = Collection::create(
         display_name,
         version_metadata,
         mod_loader.into(),
+        None,
         advanced_options.into(),
     )
     .await?;

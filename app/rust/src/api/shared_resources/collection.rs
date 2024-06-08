@@ -1,8 +1,9 @@
 pub use std::path::PathBuf;
-use std::{borrow::Cow, fs::create_dir_all};
+use std::{borrow::Cow, fs::create_dir_all, str::FromStr, sync::Arc};
 
 use chrono::{DateTime, Duration, Utc};
 use log::info;
+use manganis::ImageAsset;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -36,6 +37,7 @@ pub struct Collection {
     #[serde_as(as = "serde_with::DurationSeconds<i64>")]
     pub played_time: Duration,
     pub advanced_options: Option<AdvancedOptions>,
+    pub picture_path: PathBuf,
 
     pub entry_path: PathBuf,
     launch_args: Option<LaunchArgs>,
@@ -59,9 +61,14 @@ impl ModController {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, Default, Eq, PartialEq, Hash)]
-pub struct CollectionId(pub String);
+#[derive(Debug, Deserialize, Serialize, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+pub struct CollectionId(pub Arc<str>);
 
+impl Default for CollectionId {
+    fn default() -> Self {
+        Self(Arc::from(""))
+    }
+}
 const COLLECTION_FILE_NAME: &str = "collection.json";
 const COLLECTION_BASE: &str = "collections";
 
@@ -72,6 +79,7 @@ impl Collection {
         display_name: String,
         version_metadata: VersionMetadata,
         mod_loader: Option<ModLoader>,
+        picture_path: Option<PathBuf>,
         advanced_options: Option<AdvancedOptions>,
     ) -> anyhow::Result<Collection> {
         let now_time = Utc::now();
@@ -87,6 +95,12 @@ impl Collection {
             ModController::new(loader, mod_manager)
         });
 
+        const COLLECTION_PIC: ImageAsset = manganis::mg!(image("../../.././public/pic1.png")
+            .format(ImageType::Avif)
+            .preload());
+        let default_pic_path = PathBuf::from_str(&COLLECTION_PIC.to_string())?;
+        let picture_path = picture_path.unwrap_or(default_pic_path);
+
         let collection = Collection {
             display_name,
             minecraft_version: version_metadata,
@@ -97,6 +111,7 @@ impl Collection {
             advanced_options,
             entry_path,
             launch_args: None,
+            picture_path,
         };
 
         collection.save().await?;
@@ -212,13 +227,14 @@ impl Collection {
     }
 
     pub fn get_collection_id(&self) -> CollectionId {
-        CollectionId(
+        let id: Arc<str> = Arc::from(
             self.entry_path
                 .file_name()
                 .unwrap()
                 .to_string_lossy()
-                .to_string(),
-        )
+                .as_ref(),
+        );
+        CollectionId(id)
     }
 
     pub async fn save(&self) -> anyhow::Result<()> {
