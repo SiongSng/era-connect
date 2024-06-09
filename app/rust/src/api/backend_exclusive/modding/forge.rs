@@ -15,15 +15,18 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::AsyncBufReadExt;
 
-use crate::api::backend_exclusive::{
-    download::{execute_and_progress, DownloadArgs, DownloadBias, HandlesType},
-    modding::library::prepare_modloader_download,
-    vanilla::{
-        launcher::{prepare_vanilla_download, GameOptions, JvmOptions, LaunchArgs},
-        manifest::{fetch_game_manifest, GameManifest},
-    },
-};
 use crate::api::shared_resources::collection::Collection;
+use crate::api::{
+    backend_exclusive::{
+        download::{execute_and_progress, DownloadArgs, DownloadBias, DownloadType, HandlesType},
+        modding::library::prepare_modloader_download,
+        vanilla::{
+            launcher::{prepare_vanilla_download, GameOptions, JvmOptions, LaunchArgs},
+            manifest::{fetch_game_manifest, GameManifest},
+        },
+    },
+    shared_resources::entry::DOWNLOAD_PROGRESS,
+};
 
 use super::library::ModloaderLibrary;
 
@@ -411,7 +414,7 @@ pub async fn get_processor_main_class(path: String) -> Result<Option<String>> {
     }
     Ok(None)
 }
-pub async fn mod_loader_download(collection: &Collection) -> anyhow::Result<LaunchArgs> {
+pub async fn fetch_launch_args_modded(collection: &Collection) -> anyhow::Result<LaunchArgs> {
     let collection_id = collection.get_collection_id();
     info!("Starts Vanilla Downloading");
     let vanilla_bias = DownloadBias {
@@ -425,7 +428,7 @@ pub async fn mod_loader_download(collection: &Collection) -> anyhow::Result<Laun
         collection_id.clone(),
         vanilla_download_args,
         vanilla_bias,
-        String::from("Vanilla Download"),
+        DownloadType::vanilla(),
     )
     .await?;
 
@@ -445,7 +448,7 @@ pub async fn mod_loader_download(collection: &Collection) -> anyhow::Result<Laun
         collection_id.clone(),
         modloader_download_args,
         modloader_download_bias,
-        String::from("Modloader Processing"),
+        DownloadType::mod_loader_assets(),
     )
     .await?;
 
@@ -466,7 +469,7 @@ pub async fn mod_loader_download(collection: &Collection) -> anyhow::Result<Laun
         collection_id,
         forge_processor_progress,
         forge_processor_bias,
-        String::from("Forge Processor Processing"),
+        DownloadType::mod_loader_proccess(),
     )
     .await?;
     Ok(processed_arguments)

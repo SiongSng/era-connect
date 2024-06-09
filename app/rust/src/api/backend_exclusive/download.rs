@@ -13,7 +13,7 @@ use anyhow::{bail, Context};
 use bytes::{BufMut, Bytes, BytesMut};
 use dioxus::{prelude::spawn, signals::Readable};
 use futures::{future::BoxFuture, StreamExt};
-use log::{debug, error};
+use log::{debug, error, info};
 use reqwest::Url;
 use tokio::{
     fs::File,
@@ -146,7 +146,7 @@ pub async fn get_hash(file_path: impl AsRef<Path> + Send + Sync) -> anyhow::Resu
 
 #[derive(PartialEq, Clone, Debug, PartialOrd)]
 pub struct Progress {
-    pub name: Arc<str>,
+    pub download_type: Arc<DownloadType>,
     pub percentages: f64,
     pub speed: Option<f64>,
     pub current_size: Option<f64>,
@@ -163,14 +163,88 @@ impl Progress {
 #[derive(PartialEq, Eq, Clone, Debug, Hash, PartialOrd, Ord)]
 pub struct DownloadId {
     pub collection_id: CollectionId,
-    pub name: Arc<str>,
+    pub download_type: Arc<DownloadType>,
+}
+
+#[derive(PartialEq, Eq, Clone, Debug, Hash, PartialOrd, Ord, derive_more::Display)]
+pub enum DownloadType {
+    VanillaAssets(String),
+    ModLoaderAssets(String),
+    ModLoaderProcess(String),
+    ModsDownload(String),
+}
+
+impl DownloadType {
+    #[must_use]
+    pub fn vanilla() -> Self {
+        Self::VanillaAssets(String::from("Vanilla Downloads"))
+    }
+    #[must_use]
+    pub fn mod_loader_assets() -> Self {
+        Self::ModLoaderAssets(String::from("Modloader Download"))
+    }
+    #[must_use]
+    pub fn mod_loader_proccess() -> Self {
+        Self::ModLoaderAssets(String::from("Modloader Processing"))
+    }
+    #[must_use]
+    pub fn mods_download() -> Self {
+        Self::ModLoaderAssets(String::from("Mods Download"))
+    }
+
+    pub fn is_download_type(&self, download_type: &DownloadType) -> bool {
+        match self {
+            Self::VanillaAssets(..) => download_type.is_vanilla_assets(),
+            Self::ModLoaderAssets(..) => download_type.is_mod_loader_assets(),
+            Self::ModLoaderProcess(..) => download_type.is_mod_loader_process(),
+            Self::ModsDownload(..) => download_type.is_mods_download(),
+        }
+    }
+
+    /// Returns `true` if the download type is [`VanillaAssets`].
+    ///
+    /// [`VanillaAssets`]: DownloadType::VanillaAssets
+    #[must_use]
+    pub fn is_vanilla_assets(&self) -> bool {
+        matches!(self, Self::VanillaAssets(..))
+    }
+
+    /// Returns `true` if the download type is [`ModLoaderAssets`].
+    ///
+    /// [`ModLoaderAssets`]: DownloadType::ModLoaderAssets
+    #[must_use]
+    pub fn is_mod_loader_assets(&self) -> bool {
+        matches!(self, Self::ModLoaderAssets(..))
+    }
+
+    /// Returns `true` if the download type is [`ModLoaderProcess`].
+    ///
+    /// [`ModLoaderProcess`]: DownloadType::ModLoaderProcess
+    #[must_use]
+    pub fn is_mod_loader_process(&self) -> bool {
+        matches!(self, Self::ModLoaderProcess(..))
+    }
+
+    /// Returns `true` if the download type is [`ModsDownload`].
+    ///
+    /// [`ModsDownload`]: DownloadType::ModsDownload
+    #[must_use]
+    pub fn is_mods_download(&self) -> bool {
+        matches!(self, Self::ModsDownload(..))
+    }
+}
+
+impl Default for DownloadType {
+    fn default() -> Self {
+        Self::VanillaAssets(String::new())
+    }
 }
 
 impl DownloadId {
     pub fn from_progress(id: CollectionId, progress: &Progress) -> DownloadId {
         DownloadId {
             collection_id: id,
-            name: progress.name.clone(),
+            download_type: progress.download_type.clone(),
         }
     }
 }
@@ -178,7 +252,7 @@ impl DownloadId {
 impl Default for Progress {
     fn default() -> Self {
         Self {
-            name: String::new().into(),
+            download_type: Arc::new(DownloadType::default()),
             percentages: 100.0,
             speed: None,
             current_size: None,
@@ -209,12 +283,19 @@ impl Default for DownloadBias {
     }
 }
 
+fn progress_contains(s: &DownloadType) -> bool {
+    DOWNLOAD_PROGRESS()
+        .iter()
+        .any(|(id, _)| id.download_type.is_download_type(s))
+}
+
 // get progress and and launch download, if HandlesType doesn't exist, does not calculate speed
+// does not download stuff when download progress already has it
 pub async fn execute_and_progress(
     id: CollectionId,
     download_args: DownloadArgs<'_>,
     bias: DownloadBias,
-    name: String,
+    download_type: DownloadType,
 ) -> anyhow::Result<()> {
     debug!("receiving download request");
     let handles = download_args.handles;
@@ -230,7 +311,7 @@ pub async fn execute_and_progress(
 
     let (tx, mut rx) = unbounded_channel();
     spawn(rolling_average(
-        name,
+        download_type,
         download_complete_clone,
         current_size_clone,
         total_size_clone,
@@ -250,12 +331,11 @@ pub async fn execute_and_progress(
     download_complete.store(true, Ordering::Release);
 
     debug!("finish download request");
-
     Ok(())
 }
 
 pub async fn rolling_average(
-    name: impl Into<Arc<str>>,
+    download_type: impl Into<Arc<DownloadType>>,
     download_complete: Arc<AtomicBool>,
     current: Arc<AtomicUsize>,
     total: Arc<AtomicUsize>,
@@ -270,10 +350,10 @@ pub async fn rolling_average(
     let sleep_time = 250;
     let rolling_average_window = 5000 / sleep_time; // 5000/250 = 20
     let mut average_speed = VecDeque::with_capacity(rolling_average_window);
-    let name = name.into();
+    let download_type = download_type.into();
     loop {
         time::sleep(Duration::from_millis(250)).await;
-        let name = name.clone();
+        let download_type = download_type.clone();
         let multiplier = bias.end - bias.start;
 
         let current = current.load(Ordering::Relaxed) as f64;
@@ -295,7 +375,7 @@ pub async fn rolling_average(
             // let speed_limit = global_settings.download.download_speed_limit.as_ref();
 
             Progress {
-                name,
+                download_type,
                 percentages,
                 speed: Some(average_speed),
                 current_size: Some(current),
@@ -304,7 +384,7 @@ pub async fn rolling_average(
             }
         } else {
             Progress {
-                name,
+                download_type,
                 percentages,
                 speed: None,
                 current_size: None,

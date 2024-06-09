@@ -11,7 +11,7 @@ use super::assets::{extract_assets, parallel_assets_download};
 use super::library::{os_match, parallel_library, Library};
 use super::manifest::{self, Argument, GameManifest};
 use super::rules::{ActionType, OsName};
-use crate::api::backend_exclusive::download::{execute_and_progress, DownloadBias};
+use crate::api::backend_exclusive::download::{execute_and_progress, DownloadBias, DownloadType};
 use crate::api::backend_exclusive::vanilla::manifest::fetch_game_manifest;
 use crate::api::backend_exclusive::{
     download::{download_file, extract_filename, validate_sha1, DownloadArgs},
@@ -108,7 +108,7 @@ pub async fn full_vanilla_download(collection: &Collection) -> anyhow::Result<La
         collection_id,
         vanilla_download_args,
         vanilla_bias,
-        String::from("Download Vanilla"),
+        DownloadType::vanilla(),
     )
     .await?;
 

@@ -12,9 +12,9 @@ pub use crate::api::backend_exclusive::storage::storage_loader::StorageLoader;
 
 use crate::api::{
     backend_exclusive::{
-        download::{execute_and_progress, DownloadBias},
+        download::{execute_and_progress, DownloadBias, DownloadType},
         mod_management::mods::{ModManager, ModOverride, Tag, FERINTH, FURSE},
-        modding::forge::mod_loader_download,
+        modding::forge::fetch_launch_args_modded,
         vanilla::{
             self,
             launcher::{full_vanilla_download, LaunchArgs},
@@ -24,7 +24,7 @@ use crate::api::{
     shared_resources::entry::DATA_DIR,
 };
 
-use super::entry::STORAGE;
+use super::entry::{DOWNLOAD_PROGRESS, STORAGE};
 
 #[serde_with::serde_as]
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
@@ -181,7 +181,7 @@ impl Collection {
                 id,
                 download_args,
                 DownloadBias::default(),
-                String::from("Mods downloading"),
+                DownloadType::mods_download(),
             )
             .await?;
         }
@@ -203,19 +203,17 @@ impl Collection {
 
     /// Downloads game(also verifies)
     pub async fn verify_and_download_game(&self) -> anyhow::Result<LaunchArgs> {
-        let mod_loader = self.mod_loader();
-        let p = if let Some(mod_loader) = mod_loader {
+        if let Some(mod_loader) = self.mod_loader() {
             match mod_loader.mod_loader_type {
                 ModLoaderType::Forge
                 | ModLoaderType::NeoForge
                 | ModLoaderType::Quilt
-                | ModLoaderType::Fabric => mod_loader_download(self).await?,
+                | ModLoaderType::Fabric => fetch_launch_args_modded(self).await,
                 // _ => bail!("Modloader not yet implemented"),
             }
         } else {
-            full_vanilla_download(self).await?
-        };
-        Ok(p)
+            full_vanilla_download(self).await
+        }
     }
 
     pub fn game_directory(&self) -> PathBuf {
