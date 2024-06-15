@@ -1,12 +1,11 @@
 use anyhow::Context;
-use dioxus::signals::{GlobalSignal, Writable};
+use dioxus::signals::GlobalSignal;
 use flutter_rust_bridge::setup_default_user_utils;
 use log::{info, warn};
 use once_cell::sync::Lazy;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::fs::create_dir_all;
 use std::path::PathBuf;
-use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
 
 pub use crate::api::backend_exclusive::storage::{
@@ -22,12 +21,11 @@ use crate::api::backend_exclusive::{
 use crate::api::shared_resources::authentication::msa_flow::LoginFlowEvent;
 use crate::api::shared_resources::authentication::{self, account::MinecraftSkin};
 
-use crate::api::backend_exclusive::vanilla;
 use crate::api::backend_exclusive::vanilla::version::VersionMetadata;
 
 use crate::api::shared_resources::authentication::msa_flow::LoginFlowErrors;
 use crate::api::shared_resources::collection::Collection;
-use crate::api::shared_resources::collection::{AdvancedOptions, CollectionId, ModLoader};
+use crate::api::shared_resources::collection::{AdvancedOptions, ModLoader};
 
 pub static DATA_DIR: Lazy<PathBuf> = Lazy::new(|| {
     dirs::data_dir()
@@ -96,10 +94,6 @@ fn setup_logger() -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn get_vanilla_versions() -> anyhow::Result<Vec<VersionMetadata>> {
-    vanilla::version::get_versions().await
-}
-
 pub async fn set_ui_layout_storage(value: UILayoutValue) -> anyhow::Result<()> {
     let global_settings = &mut STORAGE.write().global_settings;
     let ui_layout = &mut global_settings.ui_layout;
@@ -147,6 +141,7 @@ pub async fn minecraft_login_flow(skin: UnboundedSender<LoginFlowEvent>) -> anyh
 
 pub async fn create_collection(
     display_name: impl Into<String>,
+    picture_path: impl Into<PathBuf>,
     version_metadata: VersionMetadata,
     mod_loader: impl Into<Option<ModLoader>>,
     advanced_options: impl Into<Option<AdvancedOptions>>,
@@ -156,7 +151,7 @@ pub async fn create_collection(
         display_name,
         version_metadata,
         mod_loader.into(),
-        None,
+        picture_path,
         advanced_options.into(),
     )
     .await?;
@@ -166,11 +161,7 @@ pub async fn create_collection(
         collection.entry_path.display()
     );
 
-    // collection.launch_game().await?;
     collection.verify_and_download_game().await?;
-    collection.download_mods().await?;
-
-    // dbg!(&collection.mod_manager.mods);
 
     info!("Successfully finished downloading game");
 

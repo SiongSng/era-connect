@@ -1,9 +1,8 @@
 pub use std::path::PathBuf;
-use std::{borrow::Cow, fs::create_dir_all, str::FromStr, sync::Arc};
+use std::{borrow::Cow, fs::create_dir_all, sync::Arc};
 
 use chrono::{DateTime, Duration, Utc};
 use log::info;
-use manganis::ImageAsset;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -24,7 +23,7 @@ use crate::api::{
     shared_resources::entry::DATA_DIR,
 };
 
-use super::entry::{DOWNLOAD_PROGRESS, STORAGE};
+use super::entry::STORAGE;
 
 #[serde_with::serde_as]
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
@@ -78,14 +77,14 @@ impl Collection {
     pub async fn create(
         display_name: String,
         version_metadata: VersionMetadata,
-        mod_loader: Option<ModLoader>,
-        picture_path: Option<PathBuf>,
+        mod_loader: impl Into<Option<ModLoader>>,
+        picture_path: impl Into<PathBuf>,
         advanced_options: Option<AdvancedOptions>,
     ) -> anyhow::Result<Collection> {
         let now_time = Utc::now();
         let loader = Self::create_loader(&display_name)?;
         let entry_path = loader.base_path.clone();
-        let mod_controller = mod_loader.map(|loader| {
+        let mod_controller = mod_loader.into().map(|loader| {
             let mod_manager = ModManager::new(
                 entry_path.join("minecraft_root"),
                 entry_path.join("mod_images"),
@@ -94,12 +93,6 @@ impl Collection {
             );
             ModController::new(loader, mod_manager)
         });
-
-        const COLLECTION_PIC: ImageAsset = manganis::mg!(image("../../.././public/pic1.png")
-            .format(ImageType::Avif)
-            .preload());
-        let default_pic_path = PathBuf::from_str(&COLLECTION_PIC.to_string())?;
-        let picture_path = picture_path.unwrap_or(default_pic_path);
 
         let collection = Collection {
             display_name,
@@ -111,7 +104,7 @@ impl Collection {
             advanced_options,
             entry_path,
             launch_args: None,
-            picture_path,
+            picture_path: picture_path.into(),
         };
 
         collection.save().await?;
