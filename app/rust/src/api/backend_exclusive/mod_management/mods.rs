@@ -5,7 +5,6 @@ use ferinth::structures::version::DependencyType;
 use furse::structures::file_structs::FileRelationType;
 use furse::structures::file_structs::HashAlgo;
 use futures::StreamExt;
-use log::debug;
 use once_cell::sync::Lazy;
 use reqwest::Url;
 use serde::Deserialize;
@@ -26,11 +25,12 @@ use tokio::fs;
 
 use crate::api::backend_exclusive::download::extract_filename;
 use crate::api::backend_exclusive::vanilla::version::VersionMetadata;
+use crate::api::backend_exclusive::vanilla::version::VERSION_MANIFEST;
 use crate::api::shared_resources::collection::ModLoader;
 use crate::api::{
     backend_exclusive::{
         download::{download_file, get_hash, validate_sha1, DownloadArgs, HandlesType},
-        vanilla::version::{get_versions, VersionType},
+        vanilla::version::VersionType,
     },
     shared_resources::collection::ModLoaderType,
 };
@@ -558,6 +558,11 @@ impl ModManager {
         Ok(search_hits)
     }
 
+    fn all_game_versions(&mut self) -> &[VersionMetadata] {
+        self.cache
+            .get_or_insert_with(|| VERSION_MANIFEST.versions.clone())
+    }
+
     // NOTE: Hacky way of doing game version check
     #[async_recursion]
     pub async fn add_project(
@@ -566,32 +571,26 @@ impl ModManager {
         tag: Vec<Tag>,
         mod_override: Vec<ModOverride>,
     ) -> anyhow::Result<()> {
-        let all_game_version = if let Some(x) = self.cache.as_deref() {
-            debug!("using cached game version");
-            x
-        } else {
-            self.cache = Some(get_versions().await?);
-            self.cache.as_deref().unwrap()
-        };
+        let target_game_version = self.target_game_version.id.clone();
+        let collection_mod_loader = self.mod_loader.mod_loader_type;
+
+        let all_game_versions = self.all_game_versions();
+
+        let collection_game_version = all_game_versions
+            .iter()
+            .find(|x| x.id == target_game_version)
+            .context("somehow can't find game versions")?;
 
         let name = match &project {
             Project::Modrinth(x) => x.title.clone(),
             Project::Curseforge(x) => x.name.clone(),
         };
-        let target_game_version = self.target_game_version.id.as_str();
 
         let versions = get_mod_version(project).await?;
 
-        let collection_mod_loader = self.mod_loader.mod_loader_type;
-
-        let collection_game_version = all_game_version
-            .iter()
-            .find(|x| x.id == self.target_game_version.id)
-            .context("somehow can't find game versions")?;
-
         let version = fetch_version_modloader_constraints(
             &name,
-            all_game_version,
+            all_game_versions,
             collection_game_version,
             collection_mod_loader,
             versions,
@@ -616,7 +615,9 @@ impl ModManager {
         tag: Vec<Tag>,
         mod_override: Vec<ModOverride>,
     ) -> anyhow::Result<()> {
-        let all_game_version = get_versions().await?;
+        let target_game_id = self.target_game_version.id.clone();
+        let collection_mod_loader = self.mod_loader.mod_loader_type;
+        let all_game_versions = self.all_game_versions();
 
         let buffered_iterator = tokio_stream::iter(projects.into_iter().map(|project| {
             tokio::spawn(async {
@@ -634,19 +635,15 @@ impl ModManager {
         .buffered(10)
         .map(|x| {
             let (name, versions) = x??;
-            let collection_mod_loader = self
-                .mod_loader
-                .clone()
-                .mod_loader_type;
 
-            let collection_game_version = all_game_version
+            let collection_game_version = all_game_versions
                 .iter()
-                .find(|x| x.id == self.target_game_version.id)
+                .find(|x| x.id == target_game_id)
                 .context("somehow can't find game versions")?;
 
             let version = fetch_version_modloader_constraints(
                 &name,
-                all_game_version.as_slice(),
+                all_game_versions,
                 collection_game_version,
                 collection_mod_loader,
                 versions,

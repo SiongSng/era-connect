@@ -1,5 +1,7 @@
 use anyhow::Context;
 use chrono::{DateTime, Utc};
+use futures::executor::block_on;
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 
 use crate::api::backend_exclusive::download::download_file;
@@ -34,6 +36,23 @@ pub struct VersionMetadata {
     pub compliance_level: u32,
 }
 
+impl VersionMetadata {
+    pub async fn from_id(id: &str) -> anyhow::Result<Self> {
+        VERSION_MANIFEST
+            .versions
+            .iter()
+            .find(|x| x.id == id)
+            .context("Can't find version_metadata with this id")
+            .cloned()
+    }
+    pub async fn latest_release() -> anyhow::Result<Self> {
+        Self::from_id(&VERSION_MANIFEST.latest.release).await
+    }
+    pub async fn latest_snapshot() -> anyhow::Result<Self> {
+        Self::from_id(&VERSION_MANIFEST.latest.snapshot).await
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum VersionType {
@@ -54,12 +73,7 @@ impl PartialOrd for VersionMetadata {
     }
 }
 
-pub async fn get_versions() -> anyhow::Result<Vec<VersionMetadata>> {
-    let response = download_file(VERSION_MANIFEST_URL, None)
-        .await
-        .context("Failed to download version manifest")?;
-    let version_manifest: VersionsManifest =
-        serde_json::from_slice(&response).context("Failed to parse version manifest")?;
-
-    Ok(version_manifest.versions)
-}
+pub static VERSION_MANIFEST: Lazy<VersionsManifest> = Lazy::new(|| {
+    let response = block_on(download_file(VERSION_MANIFEST_URL, None)).unwrap();
+    serde_json::from_slice(&response).unwrap()
+});

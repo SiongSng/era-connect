@@ -15,18 +15,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::AsyncBufReadExt;
 
-use crate::api::shared_resources::collection::Collection;
-use crate::api::{
-    backend_exclusive::{
-        download::{execute_and_progress, DownloadArgs, DownloadBias, DownloadType, HandlesType},
-        modding::library::prepare_modloader_download,
-        vanilla::{
-            launcher::{prepare_vanilla_download, GameOptions, JvmOptions, LaunchArgs},
-            manifest::{fetch_game_manifest, GameManifest},
-        },
+use crate::api::backend_exclusive::{
+    download::{execute_and_progress, DownloadArgs, DownloadBias, DownloadType, HandlesType},
+    modding::library::prepare_modloader_download,
+    vanilla::{
+        launcher::{prepare_vanilla_download, JvmOptions, LaunchArgs},
+        manifest::fetch_game_manifest,
     },
-    shared_resources::entry::DOWNLOAD_PROGRESS,
 };
+use crate::api::shared_resources::collection::Collection;
 
 use super::library::ModloaderLibrary;
 
@@ -81,8 +78,6 @@ impl ProcessorsDataType {
 pub fn processers_process<'a>(
     mut launch_args: LaunchArgs,
     jvm_options: JvmOptions,
-    game_options: GameOptions,
-    game_manifest: GameManifest,
     manifest: Value,
 ) -> Result<(LaunchArgs, DownloadArgs<'a>)> {
     let libraries_folder = jvm_options.library_directory.to_string_lossy().to_string();
@@ -461,8 +456,6 @@ pub async fn fetch_launch_args_modded(collection: &Collection) -> anyhow::Result
     let (processed_arguments, forge_processor_progress) = processers_process(
         modloader_arguments.launch_args,
         modloader_arguments.jvm_args,
-        modloader_arguments.game_args,
-        game_manifest,
         manifest,
     )?;
     execute_and_progress(
