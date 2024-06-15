@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     convert::TryInto,
     path::Path,
     sync::{
@@ -13,7 +13,7 @@ use anyhow::{bail, Context};
 use bytes::{BufMut, Bytes, BytesMut};
 use dioxus::{prelude::spawn, signals::Readable};
 use futures::{future::BoxFuture, StreamExt};
-use log::{debug, error, info};
+use log::{debug, error};
 use reqwest::Url;
 use tokio::{
     fs::File,
@@ -160,10 +160,30 @@ impl Progress {
     }
 }
 
-#[derive(PartialEq, Eq, Clone, Debug, Hash, PartialOrd, Ord)]
+#[derive(Clone, Debug)]
 pub struct DownloadId {
     pub collection_id: CollectionId,
     pub download_type: Arc<DownloadType>,
+}
+
+impl PartialEq for DownloadId {
+    fn eq(&self, other: &Self) -> bool {
+        self.collection_id == other.collection_id
+    }
+}
+
+impl Eq for DownloadId {}
+
+impl PartialOrd for DownloadId {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.collection_id.partial_cmp(&other.collection_id)
+    }
+}
+
+impl Ord for DownloadId {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.collection_id.cmp(&other.collection_id)
+    }
 }
 
 #[derive(PartialEq, Eq, Clone, Debug, Hash, PartialOrd, Ord, derive_more::Display)]
@@ -283,12 +303,6 @@ impl Default for DownloadBias {
     }
 }
 
-fn progress_contains(s: &DownloadType) -> bool {
-    DOWNLOAD_PROGRESS()
-        .iter()
-        .any(|(id, _)| id.download_type.is_download_type(s))
-}
-
 // get progress and and launch download, if HandlesType doesn't exist, does not calculate speed
 // does not download stuff when download progress already has it
 pub async fn execute_and_progress(
@@ -352,16 +366,29 @@ pub async fn rolling_average(
     let mut average_speed = VecDeque::with_capacity(rolling_average_window);
     let download_type = download_type.into();
     loop {
-        time::sleep(Duration::from_millis(250)).await;
+        time::sleep(Duration::from_millis(sleep_time.try_into().unwrap())).await;
         let download_type = download_type.clone();
         let multiplier = bias.end - bias.start;
 
         let current = current.load(Ordering::Relaxed) as f64;
         let total = total.load(Ordering::Relaxed) as f64;
         let percentages = (current / total).mul_add(multiplier, bias.start);
+        if percentages.is_nan() {
+            let progress = Progress {
+                download_type,
+                percentages: 100.0,
+                speed: Some(0.0),
+                current_size: Some(0.0),
+                total_size: Some(0.0),
+                bias: DownloadBias::default(),
+            };
+            let download_id = DownloadId::from_progress(id.clone(), &progress);
+            sender.send((download_id, progress)).unwrap();
+            return;
+        }
 
         let progress = if calculate_speed {
-            let speed = (current - prev_bytes) / instant.elapsed().as_secs_f64() / 1_000_000.0;
+            let speed = (current - prev_bytes) / instant.elapsed().as_secs_f64();
 
             if average_speed.len() < rolling_average_window {
                 average_speed.push_back(speed);
