@@ -1,7 +1,16 @@
 pub use std::path::PathBuf;
-use std::{borrow::Cow, fs::create_dir_all, sync::Arc};
+use std::{
+    borrow::{Borrow, Cow},
+    fs::create_dir_all,
+    ops::Deref,
+    sync::Arc,
+};
 
 use chrono::{DateTime, Duration, Utc};
+use dioxus::signals::{
+    AnyStorage, MappedSignal, Readable, ReadableOptionExt, ReadableRef, ReadableVecExt, Signal,
+    UnsyncStorage, WritableVecExt, Write,
+};
 use log::info;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -68,6 +77,34 @@ impl Default for CollectionId {
         Self(Arc::from(""))
     }
 }
+
+impl CollectionId {
+    pub fn try_get_collection_owned(&self) -> Option<Collection> {
+        (STORAGE.collections)()
+            .into_iter()
+            .find(|x| &x.get_collection_id() == self)
+    }
+    pub fn get_collection_owned(&self) -> Collection {
+        self.try_get_collection_owned().unwrap()
+    }
+    pub fn try_get_collection(&self) -> Option<ReadableRef<Signal<Collection>>> {
+        <UnsyncStorage as AnyStorage>::try_map(STORAGE.collections.read(), |read| {
+            read.iter().find(|x| &x.get_collection_id() == self)
+        })
+    }
+    pub fn get_collection(&self) -> ReadableRef<Signal<Collection>> {
+        self.try_get_collection().unwrap()
+    }
+    pub fn try_get_mut_collection(&self) -> Option<Write<'static, Collection>> {
+        Write::filter_map(STORAGE.collections.write(), |write| {
+            write.iter_mut().find(|x| &x.get_collection_id() == self)
+        })
+    }
+    pub fn get_mut_collection(&self) -> Write<'static, Collection> {
+        self.try_get_mut_collection().unwrap()
+    }
+}
+
 const COLLECTION_FILE_NAME: &str = "collection.json";
 const COLLECTION_BASE: &str = "collections";
 
@@ -235,7 +272,7 @@ impl Collection {
         )
         .save(&self)?;
         {
-            let binding = &mut STORAGE.write().collections;
+            let binding = &mut STORAGE.collections.write();
             if let Some(x) = binding
                 .iter_mut()
                 .filter(|x| x.get_collection_id() == self.get_collection_id())

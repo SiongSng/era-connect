@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::VecDeque,
     convert::TryInto,
     path::Path,
     sync::{
@@ -12,7 +12,7 @@ use std::{
 use anyhow::{bail, Context};
 use bytes::{BufMut, Bytes, BytesMut};
 use dioxus::{prelude::spawn, signals::Readable};
-use futures::{future::BoxFuture, StreamExt};
+use futures::{future::BoxFuture, StreamExt, TryStreamExt};
 use log::{debug, error};
 use reqwest::Url;
 use tokio::{
@@ -316,7 +316,7 @@ pub async fn execute_and_progress(
     let calculate_speed = download_args.is_size;
     let download_complete = Arc::new(AtomicBool::new(false));
 
-    let download = &STORAGE.read().global_settings.download;
+    let download = &STORAGE.global_settings.read().download;
     let max_simultaenous_download = download.max_simultatneous_download;
 
     let download_complete_clone = Arc::clone(&download_complete);
@@ -337,7 +337,7 @@ pub async fn execute_and_progress(
 
     spawn(async move {
         while let Some((download_id, x)) = rx.recv().await {
-            DOWNLOAD_PROGRESS.write().insert(download_id, x);
+            DOWNLOAD_PROGRESS.write().0.insert(download_id, x);
         }
     });
 
@@ -441,11 +441,10 @@ pub async fn join_futures(
     handles: HandlesType<'_>,
     concurrency_limit: usize,
 ) -> Result<(), anyhow::Error> {
-    let mut download_stream = tokio_stream::iter(handles).buffer_unordered(concurrency_limit);
-    while let Some(x) = download_stream.next().await {
-        x?;
-    }
-    Ok(())
+    tokio_stream::iter(handles)
+        .buffer_unordered(concurrency_limit)
+        .try_collect()
+        .await
 }
 
 pub struct DownloadArgs<'a> {

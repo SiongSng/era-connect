@@ -33,12 +33,12 @@ pub static DATA_DIR: Lazy<PathBuf> = Lazy::new(|| {
         .join("era-connect")
 });
 
-pub static STORAGE: GlobalSignal<StorageState> = GlobalSignal::new(StorageState::new);
+pub static STORAGE: StorageState = StorageState::new();
 
 pub static DOWNLOAD_PROGRESS: GlobalSignal<DownloadProgress> =
     GlobalSignal::new(DownloadProgress::new);
 
-#[derive(PartialEq, Clone, derive_more::Deref, derive_more::DerefMut)]
+#[derive(PartialEq, Clone)]
 pub struct DownloadProgress(pub BTreeMap<DownloadId, Progress>);
 
 impl DownloadProgress {
@@ -95,7 +95,7 @@ fn setup_logger() -> anyhow::Result<()> {
 }
 
 pub async fn set_ui_layout_storage(value: UILayoutValue) -> anyhow::Result<()> {
-    let global_settings = &mut STORAGE.write().global_settings;
+    let global_settings = &mut STORAGE.global_settings.write();
     let ui_layout = &mut global_settings.ui_layout;
     ui_layout.set_value(value);
     global_settings.save()?;
@@ -107,7 +107,7 @@ pub fn get_skin_file_path(skin: MinecraftSkin) -> String {
 }
 
 pub async fn remove_minecraft_account(uuid: Uuid) -> anyhow::Result<()> {
-    let storage = &mut STORAGE.write().account_storage;
+    let storage = &mut STORAGE.account_storage.write();
     storage.remove_account(uuid);
     storage.save()?;
     Ok(())
@@ -121,7 +121,7 @@ pub async fn minecraft_login_flow(skin: UnboundedSender<LoginFlowEvent>) -> anyh
                 skin.download_skin().await?;
             }
 
-            let storage = &mut STORAGE.write().account_storage;
+            let storage = &mut STORAGE.account_storage.write();
             storage.add_account(account.clone(), true);
             storage.save()?;
 

@@ -1,3 +1,5 @@
+use dioxus::signals::GlobalSignal;
+
 use crate::api::shared_resources::collection::Collection;
 
 use super::{
@@ -5,18 +7,18 @@ use super::{
     storage_loader::StorageInstance,
 };
 
-#[derive(Clone)]
+// #[derive()]
 pub struct StorageState {
-    pub account_storage: AccountStorage,
-    pub collections: Vec<Collection>,
-    pub global_settings: GlobalSettings,
+    pub account_storage: GlobalSignal<AccountStorage>,
+    pub collections: GlobalSignal<Vec<Collection>>,
+    pub global_settings: GlobalSignal<GlobalSettings>,
 }
 
 impl StorageState {
-    pub fn new() -> Self {
-        let account_storage = AccountStorage::load().unwrap_or_default();
-        let collections = Collection::scan().unwrap_or_default();
-        let global_settings = GlobalSettings::load().unwrap_or_default();
+    pub const fn new() -> Self {
+        let account_storage = GlobalSignal::new(|| AccountStorage::load().unwrap_or_default());
+        let collections = GlobalSignal::new(|| Collection::scan().unwrap_or_default());
+        let global_settings = GlobalSignal::new(|| GlobalSettings::load().unwrap_or_default());
 
         Self {
             account_storage,
