@@ -6,7 +6,7 @@ use once_cell::sync::Lazy;
 use std::collections::BTreeMap;
 use std::fs::create_dir_all;
 use std::path::PathBuf;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 
 pub use crate::api::backend_exclusive::storage::{
     account_storage::{AccountStorage, AccountStorageKey, AccountStorageValue},
@@ -23,9 +23,11 @@ use crate::api::shared_resources::authentication::{self, account::MinecraftSkin}
 
 use crate::api::backend_exclusive::vanilla::version::VersionMetadata;
 
-use crate::api::shared_resources::authentication::msa_flow::LoginFlowErrors;
+use crate::api::shared_resources::authentication::msa_flow::LoginFlowError;
 use crate::api::shared_resources::collection::Collection;
 use crate::api::shared_resources::collection::{AdvancedOptions, ModLoader};
+
+use super::authentication::msa_flow::LoginFlowDeviceCode;
 
 pub static DATA_DIR: Lazy<PathBuf> = Lazy::new(|| {
     dirs::data_dir()
@@ -113,7 +115,9 @@ pub async fn remove_minecraft_account(uuid: Uuid) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn minecraft_login_flow(skin: UnboundedSender<LoginFlowEvent>) -> anyhow::Result<()> {
+pub async fn minecraft_login_flow(
+    skin: UnboundedSender<LoginFlowEvent>,
+) -> Result<(), LoginFlowError> {
     let result = authentication::msa_flow::login_flow(skin.clone()).await;
     match result {
         Ok(account) => {
@@ -127,16 +131,10 @@ pub async fn minecraft_login_flow(skin: UnboundedSender<LoginFlowEvent>) -> anyh
 
             skin.send(LoginFlowEvent::Success(account))?;
             info!("Successfully login minecraft account");
+            Ok(())
         }
-        Err(e) => {
-            skin.send(LoginFlowEvent::Error(LoginFlowErrors::UnknownError(
-                format!("{e:#}"),
-            )))?;
-            warn!("Failed to login minecraft account: {:#}", e);
-        }
+        Err(e) => Err(e),
     }
-
-    Ok(())
 }
 
 pub async fn create_collection(

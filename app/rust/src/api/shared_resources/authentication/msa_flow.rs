@@ -25,7 +25,6 @@ use super::{
 pub enum LoginFlowEvent {
     Stage(LoginFlowStage),
     DeviceCode(LoginFlowDeviceCode),
-    Error(LoginFlowErrors),
     Success(MinecraftAccount),
 }
 
@@ -45,11 +44,18 @@ pub enum LoginFlowStage {
     GettingProfile,
 }
 
-#[derive(Debug, Clone)]
-pub enum LoginFlowErrors {
-    XstsError(XstsTokenErrorType),
-    GameNotOwned,
+#[derive(Debug, thiserror::Error)]
+pub enum LoginFlowError {
+    #[error("token Xsts issues")]
+    XstsError(#[from] XstsTokenErrorType),
+    #[error("unknown data store error")]
     UnknownError(String),
+    #[error("you don't own the game")]
+    GameNotOwned,
+    #[error("having issues sending through the channel")]
+    Senderror(#[from] tokio::sync::mpsc::error::SendError<LoginFlowEvent>),
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
 }
 
 type OAuthClient = oauth2::Client<
@@ -90,18 +96,18 @@ struct XstsTokenError {
 }
 
 /// Reference: [Unofficial Mojang Wiki](https://wiki.vg/Microsoft_Authentication_Scheme)
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, thiserror::Error)]
 #[repr(usize)]
 pub enum XstsTokenErrorType {
-    /// The account doesn't have an Xbox account. Once they sign up for one (or login through minecraft.net to create one) then they can proceed with the login. This shouldn't happen with accounts that have purchased Minecraft with a Microsoft account, as they would've already gone through that Xbox signup process.
+    #[error("The account doesn't have an Xbox account. Once they sign up for one (or login through minecraft.net to create one) then they can proceed with the login. This shouldn't happen with accounts that have purchased Minecraft with a Microsoft account, as they would've already gone through that Xbox signup process.")]
     DoesNotHaveXboxAccount = 2_148_916_233,
-    /// The account is from a country where Xbox Live is not available/banned.
+    #[error("The account is from a country where Xbox Live is not available/banned.")]
     CountryNotAvailable = 2_148_916_235,
-    /// The account needs adult verification on Xbox page. (South Korea)
+    #[error("The account needs adult verification on Xbox page. (South Korea)")]
     NeedsAdultVerificationKR1 = 2_148_916_236,
-    /// The account needs adult verification on Xbox page. (South Korea)
+    #[error("The account needs adult verification on Xbox page. (South Korea)")]
     NeedsAdultVerificationKR2 = 2_148_916_237,
-    /// The account is a child (under 18) and cannot proceed unless the account is added to a Family by an adult. This only seems to occur when using a custom Microsoft Azure application. When using the Minecraft launchers client id, this doesn't trigger.
+    #[error("The account is a child (under 18) and cannot proceed unless the account is added to a Family by an adult. This only seems to occur when using a custom Microsoft Azure application. When using the Minecraft launchers client id, this doesn't trigger.")]
     ChildAccount = 2_148_916_238,
 }
 
@@ -120,7 +126,9 @@ pub struct MinecraftUserProfile {
     pub capes: Vec<MinecraftCape>,
 }
 
-pub async fn login_flow(skin: UnboundedSender<LoginFlowEvent>) -> anyhow::Result<MinecraftAccount> {
+pub async fn login_flow(
+    skin: UnboundedSender<LoginFlowEvent>,
+) -> Result<MinecraftAccount, LoginFlowError> {
     skin.send(LoginFlowEvent::Stage(LoginFlowStage::FetchingDeviceCode))?;
 
     // Device Code Flow
@@ -154,8 +162,7 @@ pub async fn login_flow(skin: UnboundedSender<LoginFlowEvent>) -> anyhow::Result
             token
         }
         XstsResponse::Error(e) => {
-            skin.send(LoginFlowEvent::Error(LoginFlowErrors::XstsError(e.xerr)))?;
-            return Err(anyhow::anyhow!("XSTS Error"));
+            return Err(e.xerr.into());
         }
     };
 
@@ -166,8 +173,7 @@ pub async fn login_flow(skin: UnboundedSender<LoginFlowEvent>) -> anyhow::Result
     let profile = match get_user_profile(&mc_access_token).await {
         Ok(profile) => profile,
         Err(e) => {
-            skin.send(LoginFlowEvent::Error(LoginFlowErrors::GameNotOwned))?;
-            return Err(anyhow::anyhow!("Game not owned: {}", e));
+            return Err(LoginFlowError::GameNotOwned);
         }
     };
 
