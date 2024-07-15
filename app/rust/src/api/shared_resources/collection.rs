@@ -1,16 +1,9 @@
 pub use std::path::PathBuf;
-use std::{
-    borrow::{Borrow, Cow},
-    fs::create_dir_all,
-    ops::Deref,
-    sync::Arc,
-};
+use std::{borrow::Cow, fs::create_dir_all, sync::Arc};
 
 use chrono::{DateTime, Duration, Utc};
-use dioxus::signals::{
-    AnyStorage, MappedSignal, Readable, ReadableOptionExt, ReadableRef, ReadableVecExt, Signal,
-    UnsyncStorage, WritableVecExt, Write,
-};
+use dioxus::signals::UnsyncStorage;
+use dioxus::signals::{AnyStorage, Readable, ReadableRef, Signal, Write};
 use log::info;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
