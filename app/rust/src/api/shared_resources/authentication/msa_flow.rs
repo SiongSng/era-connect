@@ -170,12 +170,7 @@ pub async fn login_flow(
     let (mc_access_token, expires_in) = fetch_minecraft_token(&xsts_token, &user_hash).await?;
     skin.send(LoginFlowEvent::Stage(LoginFlowStage::GettingProfile))?;
 
-    let profile = match get_user_profile(&mc_access_token).await {
-        Ok(profile) => profile,
-        Err(e) => {
-            return Err(LoginFlowError::GameNotOwned);
-        }
-    };
+    let profile = get_user_profile(&mc_access_token).await?;
 
     let account = MinecraftAccount {
         username: profile.name,

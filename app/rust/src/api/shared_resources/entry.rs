@@ -1,12 +1,12 @@
 use anyhow::Context;
 use dioxus::signals::GlobalSignal;
 use flutter_rust_bridge::setup_default_user_utils;
-use log::{info, warn};
+use log::info;
 use once_cell::sync::Lazy;
 use std::collections::BTreeMap;
 use std::fs::create_dir_all;
 use std::path::PathBuf;
-use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
+use tokio::sync::mpsc::UnboundedSender;
 
 pub use crate::api::backend_exclusive::storage::{
     account_storage::{AccountStorage, AccountStorageKey, AccountStorageValue},
@@ -26,8 +26,6 @@ use crate::api::backend_exclusive::vanilla::version::VersionMetadata;
 use crate::api::shared_resources::authentication::msa_flow::LoginFlowError;
 use crate::api::shared_resources::collection::Collection;
 use crate::api::shared_resources::collection::{AdvancedOptions, ModLoader};
-
-use super::authentication::msa_flow::LoginFlowDeviceCode;
 
 pub static DATA_DIR: Lazy<PathBuf> = Lazy::new(|| {
     dirs::data_dir()
