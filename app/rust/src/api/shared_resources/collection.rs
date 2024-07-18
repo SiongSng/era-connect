@@ -73,25 +73,19 @@ impl Default for CollectionId {
 
 impl CollectionId {
     pub fn try_get_collection_owned(&self) -> Option<Collection> {
-        (STORAGE.collections)()
-            .into_iter()
-            .find(|x| &x.get_collection_id() == self)
+        (STORAGE.collections)().get(self).cloned()
     }
     pub fn get_collection_owned(&self) -> Collection {
         self.try_get_collection_owned().unwrap()
     }
     pub fn try_get_collection(&self) -> Option<ReadableRef<Signal<Collection>>> {
-        <UnsyncStorage as AnyStorage>::try_map(STORAGE.collections.read(), |read| {
-            read.iter().find(|x| &x.get_collection_id() == self)
-        })
+        <UnsyncStorage as AnyStorage>::try_map(STORAGE.collections.read(), |read| read.get(self))
     }
     pub fn get_collection(&self) -> ReadableRef<Signal<Collection>> {
         self.try_get_collection().unwrap()
     }
     pub fn try_get_mut_collection(&self) -> Option<Write<'static, Collection>> {
-        Write::filter_map(STORAGE.collections.write(), |write| {
-            write.iter_mut().find(|x| &x.get_collection_id() == self)
-        })
+        Write::filter_map(STORAGE.collections.write(), |write| write.get_mut(self))
     }
     pub fn get_mut_collection(&self) -> Write<'static, Collection> {
         self.try_get_mut_collection().unwrap()
@@ -266,18 +260,13 @@ impl Collection {
         .save(&self)?;
         {
             let binding = &mut STORAGE.collections.write();
-            if let Some(x) = binding
-                .iter_mut()
-                .filter(|x| x.get_collection_id() == self.get_collection_id())
-                .find(|x| &**x != self)
-            {
-                *x = self.clone();
+            if let Some(x) = binding.get_mut(&self.get_collection_id()) {
+                if x != self {
+                    *x = self.clone();
+                }
             }
-            if binding
-                .iter()
-                .all(|x| x.get_collection_id() != self.get_collection_id())
-            {
-                binding.push(self.clone());
+            if binding.keys().all(|x| x != &self.get_collection_id()) {
+                binding.insert(self.get_collection_id(), self.clone());
             }
         }
         Ok(())

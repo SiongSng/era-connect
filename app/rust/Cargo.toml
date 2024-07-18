@@ -50,3 +50,4 @@ dioxus-sdk = { version = "0.5.0", features = ["storage"] }
 dioxus = { git = "https://github.com/DioxusLabs/dioxus", version = "0.5.2" }
 manganis = "0.2.2"
 thiserror = "1.0.62"
+ordermap = "0.5.0"
