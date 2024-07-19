@@ -1,9 +1,10 @@
+use std::path::Path;
 pub use std::path::PathBuf;
 use std::{borrow::Cow, fs::create_dir_all, sync::Arc};
 
 use chrono::{DateTime, Duration, Utc};
-use dioxus::signals::UnsyncStorage;
 use dioxus::signals::{AnyStorage, Readable, ReadableRef, Signal, Write};
+use dioxus::signals::{UnsyncStorage, Writable};
 use log::info;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -30,18 +31,43 @@ use super::entry::STORAGE;
 #[serde_with::serde_as]
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 pub struct Collection {
-    pub display_name: String,
-    pub minecraft_version: VersionMetadata,
-    pub mod_controller: Option<ModController>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    display_name: String,
+    minecraft_version: VersionMetadata,
+    mod_controller: Option<ModController>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
     #[serde_as(as = "serde_with::DurationSeconds<i64>")]
-    pub played_time: Duration,
-    pub advanced_options: Option<AdvancedOptions>,
-    pub picture_path: PathBuf,
+    played_time: Duration,
+    advanced_options: Option<AdvancedOptions>,
+    picture_path: PathBuf,
 
-    pub entry_path: PathBuf,
+    entry_path: PathBuf,
     launch_args: Option<LaunchArgs>,
+}
+
+pub struct CollectionViewMut<'a> {
+    pub display_name: &'a mut String,
+    pub minecraft_version: &'a mut VersionMetadata,
+    pub mod_controller: Option<&'a mut ModController>,
+    pub created_at: &'a mut DateTime<Utc>,
+    pub updated_at: &'a mut DateTime<Utc>,
+    pub played_time: &'a mut Duration,
+    pub advanced_options: Option<&'a mut AdvancedOptions>,
+    pub picture_path: &'a mut PathBuf,
+    pub entry_path: &'a mut PathBuf,
+}
+
+impl CollectionViewMut<'_> {
+    pub fn get_collection_id(&self) -> CollectionId {
+        let id: Arc<str> = Arc::from(
+            self.entry_path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .as_ref(),
+        );
+        CollectionId(id)
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
@@ -62,7 +88,9 @@ impl ModController {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+#[derive(
+    Debug, Deserialize, Serialize, Clone, Eq, PartialEq, Hash, PartialOrd, Ord, derive_more::Display,
+)]
 pub struct CollectionId(pub Arc<str>);
 
 impl Default for CollectionId {
@@ -97,6 +125,73 @@ const COLLECTION_BASE: &str = "collections";
 
 /// if a method has `&mut self`, remember to call `self.save()` to actually save it!
 impl Collection {
+    pub fn display_name(&self) -> &String {
+        &self.display_name
+    }
+    pub fn minecraft_version(&self) -> &VersionMetadata {
+        &self.minecraft_version
+    }
+    pub fn mod_controller(&self) -> Option<&ModController> {
+        self.mod_controller.as_ref()
+    }
+    pub fn created_at(&self) -> &DateTime<Utc> {
+        &self.created_at
+    }
+    pub fn updated_at(&self) -> &DateTime<Utc> {
+        &self.updated_at
+    }
+    pub fn advanced_options(&self) -> Option<&AdvancedOptions> {
+        self.advanced_options.as_ref()
+    }
+    pub fn picture_path(&self) -> &Path {
+        self.picture_path.as_path()
+    }
+    pub fn entry_path(&self) -> &Path {
+        self.entry_path.as_path()
+    }
+    pub fn display_name_owned(self) -> String {
+        self.display_name
+    }
+    pub fn minecraft_version_owned(self) -> VersionMetadata {
+        self.minecraft_version
+    }
+    pub fn mod_controller_owned(self) -> Option<ModController> {
+        self.mod_controller
+    }
+    pub fn created_at_owned(self) -> DateTime<Utc> {
+        self.created_at
+    }
+    pub fn updated_at_owned(self) -> DateTime<Utc> {
+        self.updated_at
+    }
+    pub fn advanced_options_owned(self) -> Option<AdvancedOptions> {
+        self.advanced_options
+    }
+    pub fn picture_path_owned(self) -> PathBuf {
+        self.picture_path
+    }
+    pub fn entry_path_owned(self) -> PathBuf {
+        self.entry_path
+    }
+
+    pub fn with_mut(&mut self, f: impl FnOnce(CollectionViewMut)) -> anyhow::Result<()> {
+        f(CollectionViewMut {
+            display_name: &mut self.display_name,
+            minecraft_version: &mut self.minecraft_version,
+            mod_controller: self.mod_controller.as_mut(),
+            created_at: &mut self.created_at,
+            updated_at: &mut self.updated_at,
+            played_time: &mut self.played_time,
+            advanced_options: self.advanced_options.as_mut(),
+            picture_path: &mut self.picture_path,
+            entry_path: &mut self.entry_path,
+        });
+        StorageLoader::new(
+            COLLECTION_FILE_NAME.to_string(),
+            Cow::Borrowed(&self.entry_path),
+        )
+        .save(&self)
+    }
     /// Creates a collection and return a collection with its loader attached
     pub async fn create(
         display_name: String,
@@ -131,7 +226,7 @@ impl Collection {
             picture_path: picture_path.into(),
         };
 
-        collection.save().await?;
+        collection.save()?;
 
         Ok(collection)
     }
@@ -150,7 +245,7 @@ impl Collection {
                 .add_project(project.into(), tag, mod_override.unwrap_or(Vec::new()))
                 .await?;
         }
-        self.save().await?;
+        self.save()?;
         Ok(())
     }
 
@@ -171,7 +266,7 @@ impl Collection {
                 )
                 .await?;
         }
-        self.save().await?;
+        self.save()?;
         Ok(())
     }
     pub async fn add_curseforge_mod(
@@ -186,7 +281,7 @@ impl Collection {
                 .add_project(project.into(), tag, mod_override.unwrap_or(Vec::new()))
                 .await?;
         }
-        self.save().await?;
+        self.save()?;
         Ok(())
     }
 
@@ -209,7 +304,7 @@ impl Collection {
     pub async fn launch_game(&mut self) -> anyhow::Result<()> {
         if self.launch_args.is_none() {
             self.launch_args = Some(self.verify_and_download_game().await?);
-            self.save().await?;
+            self.save()?;
         }
         vanilla::launcher::launch_game(&self.launch_args.as_ref().unwrap()).await
     }
@@ -252,23 +347,22 @@ impl Collection {
         CollectionId(id)
     }
 
-    pub async fn save(&self) -> anyhow::Result<()> {
+    fn save(&self) -> anyhow::Result<()> {
         StorageLoader::new(
             COLLECTION_FILE_NAME.to_string(),
             Cow::Borrowed(&self.entry_path),
         )
         .save(&self)?;
-        {
-            let binding = &mut STORAGE.collections.write();
-            if let Some(x) = binding.get_mut(&self.get_collection_id()) {
+        STORAGE
+            .collections
+            .try_write_unchecked()?
+            .entry(self.get_collection_id())
+            .and_modify(|x| {
                 if x != self {
-                    *x = self.clone();
+                    *x = x.clone();
                 }
-            }
-            if binding.keys().all(|x| x != &self.get_collection_id()) {
-                binding.insert(self.get_collection_id(), self.clone());
-            }
-        }
+            })
+            .or_insert(self.clone());
         Ok(())
     }
 

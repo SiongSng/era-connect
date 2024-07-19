@@ -416,7 +416,7 @@ pub async fn fetch_launch_args_modded(collection: &Collection) -> anyhow::Result
         start: 0.0,
         end: 80.0,
     };
-    let game_manifest = fetch_game_manifest(&collection.minecraft_version.url).await?;
+    let game_manifest = fetch_game_manifest(&collection.minecraft_version().url).await?;
     let (vanilla_download_args, vanilla_arguments) =
         prepare_vanilla_download(collection, game_manifest.clone()).await?;
     execute_and_progress(

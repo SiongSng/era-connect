@@ -154,7 +154,7 @@ pub async fn create_collection(
 
     info!(
         "Successfully created collection basic file at {}",
-        collection.entry_path.display()
+        collection.entry_path().display()
     );
 
     collection.verify_and_download_game().await?;

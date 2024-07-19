@@ -101,7 +101,7 @@ pub async fn full_vanilla_download(collection: &Collection) -> anyhow::Result<La
         start: 0.0,
         end: 100.0,
     };
-    let game_manifest = fetch_game_manifest(&collection.minecraft_version.url).await?;
+    let game_manifest = fetch_game_manifest(&collection.minecraft_version().url).await?;
     let (vanilla_download_args, vanilla_arguments) =
         prepare_vanilla_download(collection, game_manifest.clone()).await?;
     execute_and_progress(
@@ -131,7 +131,7 @@ pub async fn prepare_vanilla_download<'a>(
     collection: &Collection,
     game_manifest: GameManifest,
 ) -> Result<(DownloadArgs<'a>, ProcessedArguments)> {
-    let version_id = collection.minecraft_version.id.clone();
+    let version_id = collection.minecraft_version().id.clone();
     let shared_path = get_global_shared_path();
 
     let game_directory = collection.game_directory();
@@ -221,7 +221,7 @@ pub async fn prepare_vanilla_download<'a>(
     let asset_settings = extract_assets(&game_manifest.asset_index, asset_directory).await?;
     parallel_assets_download(asset_settings, &current_size, &total_size, &mut handles).await?;
 
-    if let Some(advanced_option) = &collection.advanced_options {
+    if let Some(advanced_option) = &collection.advanced_options() {
         if let Some(max_memory) = advanced_option.jvm_max_memory {
             jvm_flags.arguments.push(format!("-Xmx{max_memory}M"))
         }

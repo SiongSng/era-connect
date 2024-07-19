@@ -7,7 +7,6 @@ use super::{
     storage_loader::StorageInstance,
 };
 
-// #[derive()]
 pub struct StorageState {
     pub account_storage: GlobalSignal<AccountStorage>,
     pub collections: GlobalSignal<ordermap::map::OrderMap<CollectionId, Collection>>,
