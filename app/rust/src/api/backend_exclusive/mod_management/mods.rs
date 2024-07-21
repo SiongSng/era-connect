@@ -24,8 +24,8 @@ use log::error;
 use tokio::fs;
 
 use crate::api::backend_exclusive::download::extract_filename;
+use crate::api::backend_exclusive::vanilla::version::get_version_manifest;
 use crate::api::backend_exclusive::vanilla::version::VersionMetadata;
-use crate::api::backend_exclusive::vanilla::version::VERSION_MANIFEST;
 use crate::api::shared_resources::collection::ModLoader;
 use crate::api::{
     backend_exclusive::{
@@ -558,9 +558,16 @@ impl ModManager {
         Ok(search_hits)
     }
 
-    fn all_game_versions(&mut self) -> &[VersionMetadata] {
-        self.cache
-            .get_or_insert_with(|| VERSION_MANIFEST.versions.clone())
+    async fn all_game_versions(&mut self) -> anyhow::Result<&[VersionMetadata]> {
+        let version = get_version_manifest();
+
+        if let None = self.cache {
+            self.cache = Some(version.await?.versions);
+        }
+
+        // SAFETY: a `None` variant for `self.cache` would have been replaced by a `Some`
+        // variant in the code above.
+        Ok(unsafe { self.cache.as_mut().unwrap_unchecked() })
     }
 
     // NOTE: Hacky way of doing game version check
@@ -574,7 +581,7 @@ impl ModManager {
         let target_game_version = self.target_game_version.id.clone();
         let collection_mod_loader = self.mod_loader.mod_loader_type;
 
-        let all_game_versions = self.all_game_versions();
+        let all_game_versions = self.all_game_versions().await?;
 
         let collection_game_version = all_game_versions
             .iter()
@@ -617,7 +624,7 @@ impl ModManager {
     ) -> anyhow::Result<()> {
         let target_game_id = self.target_game_version.id.clone();
         let collection_mod_loader = self.mod_loader.mod_loader_type;
-        let all_game_versions = self.all_game_versions();
+        let all_game_versions = self.all_game_versions().await?;
 
         let buffered_iterator = tokio_stream::iter(projects.into_iter().map(|project| {
             tokio::spawn(async {

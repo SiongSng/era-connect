@@ -1,20 +1,19 @@
 use anyhow::Context;
 use chrono::{DateTime, Utc};
-use futures::executor::block_on;
-use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
+use tokio::sync::RwLock;
 
 use crate::api::backend_exclusive::download::download_file;
 
 const VERSION_MANIFEST_URL: &str = "https://meta.modrinth.com/minecraft/v0/manifest.json";
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct VersionsManifest {
     pub latest: LatestVersion,
     pub versions: Vec<VersionMetadata>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct LatestVersion {
     pub release: String,
     pub snapshot: String,
@@ -38,7 +37,8 @@ pub struct VersionMetadata {
 
 impl VersionMetadata {
     pub async fn from_id(id: &str) -> anyhow::Result<Self> {
-        VERSION_MANIFEST
+        get_version_manifest()
+            .await?
             .versions
             .iter()
             .find(|x| x.id == id)
@@ -46,10 +46,10 @@ impl VersionMetadata {
             .cloned()
     }
     pub async fn latest_release() -> anyhow::Result<Self> {
-        Self::from_id(&VERSION_MANIFEST.latest.release).await
+        Self::from_id(&get_version_manifest().await?.latest.release).await
     }
     pub async fn latest_snapshot() -> anyhow::Result<Self> {
-        Self::from_id(&VERSION_MANIFEST.latest.snapshot).await
+        Self::from_id(&get_version_manifest().await?.latest.snapshot).await
     }
 }
 
@@ -73,7 +73,11 @@ impl PartialOrd for VersionMetadata {
     }
 }
 
-pub static VERSION_MANIFEST: Lazy<VersionsManifest> = Lazy::new(|| {
-    let response = block_on(download_file(VERSION_MANIFEST_URL, None)).unwrap();
-    serde_json::from_slice(&response).unwrap()
-});
+static TEMP: RwLock<Option<VersionsManifest>> = RwLock::const_new(None);
+
+pub async fn get_version_manifest() -> anyhow::Result<VersionsManifest> {
+    let response = download_file(VERSION_MANIFEST_URL, None).await?;
+    let slice = serde_json::from_slice(&response)?;
+    let slice = TEMP.write().await.get_or_insert_with(|| slice).clone();
+    Ok(slice)
+}
