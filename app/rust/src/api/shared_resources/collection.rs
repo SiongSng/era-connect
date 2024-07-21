@@ -3,8 +3,8 @@ pub use std::path::PathBuf;
 use std::{borrow::Cow, fs::create_dir_all, sync::Arc};
 
 use chrono::{DateTime, Duration, Utc};
-use dioxus::signals::{AnyStorage, Readable, ReadableRef, Signal, Write};
-use dioxus::signals::{UnsyncStorage, Writable};
+use dioxus::signals::Writable;
+use dioxus::signals::{MappedSignal, Readable, Write};
 use log::info;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -91,7 +91,7 @@ impl ModController {
 #[derive(
     Debug, Deserialize, Serialize, Clone, Eq, PartialEq, Hash, PartialOrd, Ord, derive_more::Display,
 )]
-pub struct CollectionId(pub Arc<str>);
+pub struct CollectionId(Arc<str>);
 
 impl Default for CollectionId {
     fn default() -> Self {
@@ -106,17 +106,18 @@ impl CollectionId {
     pub fn get_collection_owned(&self) -> Collection {
         self.try_get_collection_owned().unwrap()
     }
-    pub fn try_get_collection(&self) -> Option<ReadableRef<Signal<Collection>>> {
-        <UnsyncStorage as AnyStorage>::try_map(STORAGE.collections.read(), |read| read.get(self))
-    }
-    pub fn get_collection(&self) -> ReadableRef<Signal<Collection>> {
-        self.try_get_collection().unwrap()
+    pub fn get_collection(self) -> MappedSignal<Collection> {
+        STORAGE
+            .collections
+            .signal()
+            .map(move |x| x.get(&self).unwrap())
     }
     pub fn try_get_mut_collection(&self) -> Option<Write<'static, Collection>> {
         Write::filter_map(STORAGE.collections.write(), |write| write.get_mut(self))
     }
     pub fn get_mut_collection(&self) -> Write<'static, Collection> {
-        self.try_get_mut_collection().unwrap()
+        self.try_get_mut_collection()
+            .expect("Please ensure this is a valid CollectionId")
     }
 }
 
