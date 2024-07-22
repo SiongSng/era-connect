@@ -1,17 +1,10 @@
-use anyhow::Context;
 use dioxus::signals::GlobalSignal;
-use flutter_rust_bridge::setup_default_user_utils;
-use log::info;
+use dioxus_logger::tracing::info;
 use once_cell::sync::Lazy;
 use std::collections::BTreeMap;
-use std::fs::create_dir_all;
 use std::path::PathBuf;
 use tokio::sync::mpsc::UnboundedSender;
 
-pub use crate::api::backend_exclusive::storage::{
-    account_storage::{AccountStorage, AccountStorageKey, AccountStorageValue},
-    global_settings::{UILayout, UILayoutKey, UILayoutValue},
-};
 use uuid::Uuid;
 
 use crate::api::backend_exclusive::{
@@ -50,56 +43,6 @@ impl DownloadProgress {
         // self.0.into_iter().collect::<BTreeMap<_, _>>();
         self.0.into_values().collect()
     }
-}
-
-pub fn init_app() -> anyhow::Result<()> {
-    setup_default_user_utils();
-    setup_logger()?;
-    Ok(())
-}
-
-fn setup_logger() -> anyhow::Result<()> {
-    use chrono::Local;
-
-    let file_name = format!("{}.log", Local::now().format("%Y-%m-%d-%H-%M-%S"));
-    let file_path = DATA_DIR.join("logs").join(file_name);
-    let parent = file_path
-        .parent()
-        .context("Failed to get the parent directory of logs directory")?;
-    create_dir_all(parent)?;
-
-    fern::Dispatch::new()
-        .format(|out, message, record| {
-            out.finish(format_args!(
-                "[{}] {} | {}:{} | {}",
-                Local::now().format("%Y-%m-%d %H:%M:%S"),
-                record.level(),
-                record.file().unwrap_or_else(|| record.target()),
-                record.line().unwrap_or(0),
-                message
-            ));
-        })
-        .chain(std::io::stdout())
-        .chain(fern::log_file(file_path)?)
-        .filter(|metadata| {
-            if cfg!(debug_assertions) {
-                metadata.level() <= log::LevelFilter::Debug
-            } else {
-                metadata.level() <= log::LevelFilter::Info
-            }
-        })
-        .apply()?;
-
-    info!("Successfully setup logger");
-    Ok(())
-}
-
-pub async fn set_ui_layout_storage(value: UILayoutValue) -> anyhow::Result<()> {
-    let global_settings = &mut STORAGE.global_settings.write();
-    let ui_layout = &mut global_settings.ui_layout;
-    ui_layout.set_value(value);
-    global_settings.save()?;
-    Ok(())
 }
 
 pub fn get_skin_file_path(skin: MinecraftSkin) -> String {

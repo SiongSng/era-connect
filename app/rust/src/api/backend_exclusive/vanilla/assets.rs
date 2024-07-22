@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Context, Result};
-use log::error;
+use dioxus_logger::tracing::{debug, error};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -89,67 +89,67 @@ pub async fn parallel_assets_download(
     assets: AssetSettings,
     current_size: &Arc<AtomicUsize>,
     total_size: &Arc<AtomicUsize>,
-    handles: &mut HandlesType<'_>,
+    handles: &mut HandlesType,
 ) -> Result<()> {
-    let asset_download_list_arc = Arc::new(assets.asset_download_list);
-    let asset_download_hash_arc = Arc::new(assets.asset_download_hash);
-    let asset_download_path_arc = Arc::new(assets.asset_download_path);
-    let asset_download_size_arc = Arc::new(assets.asset_download_size);
-    for index in 0..asset_download_list_arc.len() {
-        let asset_download_list_clone = Arc::clone(&asset_download_list_arc);
-        let asset_download_path_clone = Arc::clone(&asset_download_path_arc);
-        let asset_download_path = asset_download_path_clone
-            .get(index)
-            .context("can't get asset_download_path index")?;
-        let current_size_clone = Arc::clone(current_size);
-        fs::create_dir_all(
-            asset_download_path
-                .parent()
-                .context("can't find asset_download's parent dir")?,
-        )
-        .await?;
-        let okto_download = if asset_download_path.exists() {
-            if let Err(x) = validate_sha1(
-                asset_download_path,
-                asset_download_hash_arc
-                    .get(index)
-                    .context("Can't get asset download hash")?,
+    let asset_download_list = Arc::new(assets.asset_download_list);
+    let asset_download_hash = Arc::new(assets.asset_download_hash);
+    let asset_download_path = Arc::new(assets.asset_download_path);
+    let asset_download_size = Arc::new(assets.asset_download_size);
+    for index in 0..asset_download_list.len() {
+        debug!("downloading asset");
+        let current_size = Arc::clone(current_size);
+        let total_size = Arc::clone(total_size);
+        let asset_download_list = Arc::clone(&asset_download_list);
+        let asset_download_size = Arc::clone(&asset_download_size);
+        let asset_download_hash = Arc::clone(&asset_download_hash);
+        let asset_download_paths = Arc::clone(&asset_download_path);
+        handles.push(Box::pin(async move {
+            let asset_download_path = asset_download_paths
+                .get(index)
+                .context("can't get asset_download_path index")?;
+            fs::create_dir_all(
+                asset_download_path
+                    .parent()
+                    .context("can't find asset_download's parent dir")?,
             )
-            .await
-            {
-                error!("{x}, \nredownloading.");
-                true
-            } else {
-                false
-            }
-        } else {
-            true
-        };
-        if okto_download {
-            total_size.fetch_add(
-                *asset_download_size_arc
-                    .get(index)
-                    .context("Can't get asset download size")?,
-                Ordering::Relaxed,
-            );
-            handles.push(Box::pin(async move {
-                let bytes = download_file(
-                    asset_download_list_clone
+            .await?;
+            let okto_download = if asset_download_path.exists() {
+                if let Err(x) = validate_sha1(
+                    asset_download_path,
+                    asset_download_hash
                         .get(index)
-                        .context("Can't get asset download list")?,
-                    current_size_clone,
-                )
-                .await?;
-                fs::write(
-                    asset_download_path_clone
-                        .get(index)
-                        .context("Can't get asset download path at index: {index}")?,
-                    bytes,
+                        .context("Can't get asset download hash")?,
                 )
                 .await
-                .map_err(|err| anyhow!(err))
-            }));
-        }
+                {
+                    error!("{x}, \nredownloading.");
+                    true
+                } else {
+                    false
+                }
+            } else {
+                true
+            };
+            if okto_download {
+                total_size.fetch_add(
+                    *asset_download_size
+                        .get(index)
+                        .context("Can't get asset download size")?,
+                    Ordering::Relaxed,
+                );
+                let bytes = download_file(
+                    asset_download_list
+                        .get(index)
+                        .context("Can't get asset download list")?,
+                    current_size,
+                )
+                .await?;
+                fs::write(asset_download_path, bytes)
+                    .await
+                    .map_err(|err| anyhow!(err))?;
+            }
+            Ok(())
+        }));
     }
     Ok(())
 }

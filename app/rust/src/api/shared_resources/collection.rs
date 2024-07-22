@@ -1,11 +1,12 @@
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::Path;
 pub use std::path::PathBuf;
-use std::{borrow::Cow, fs::create_dir_all, sync::Arc};
+use std::{borrow::Cow, fs::create_dir_all};
 
 use chrono::{DateTime, Duration, Utc};
 use dioxus::signals::Writable;
 use dioxus::signals::{MappedSignal, Readable, Write};
-use log::info;
+use dioxus_logger::tracing::info;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -57,16 +58,33 @@ pub struct CollectionViewMut<'a> {
     pub entry_path: &'a mut PathBuf,
 }
 
-impl CollectionViewMut<'_> {
-    pub fn get_collection_id(&self) -> CollectionId {
-        let id: Arc<str> = Arc::from(
-            self.entry_path
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .as_ref(),
-        );
-        CollectionId(id)
+#[derive(
+    Debug, Deserialize, Serialize, Clone, Eq, PartialEq, Hash, PartialOrd, Ord, derive_more::Display,
+)]
+pub struct CollectionId(u64);
+
+impl CollectionId {
+    pub fn try_get_collection_owned(&self) -> Option<Collection> {
+        (STORAGE.collections)().get(self).cloned()
+    }
+    pub fn get_collection_owned(&self) -> Collection {
+        self.try_get_collection_owned().unwrap()
+    }
+    pub fn get_collection(self) -> MappedSignal<Collection> {
+        STORAGE
+            .collections
+            .signal()
+            .map(move |x| x.get(&self).unwrap())
+    }
+
+    pub fn with_mut_collection(&self, f: impl FnOnce(CollectionViewMut)) -> anyhow::Result<()> {
+        STORAGE
+            .collections
+            .with_mut(|x| x.get_mut(self).unwrap().with_mut(f))
+    }
+
+    pub fn try_get_mut_collection(&self) -> Option<Write<'static, Collection>> {
+        Write::filter_map(STORAGE.collections.write(), |write| write.get_mut(self))
     }
 }
 
@@ -85,39 +103,6 @@ impl ModController {
 impl ModController {
     pub fn new(loader: ModLoader, manager: ModManager) -> Self {
         Self { loader, manager }
-    }
-}
-
-#[derive(
-    Debug, Deserialize, Serialize, Clone, Eq, PartialEq, Hash, PartialOrd, Ord, derive_more::Display,
-)]
-pub struct CollectionId(Arc<str>);
-
-impl Default for CollectionId {
-    fn default() -> Self {
-        Self(Arc::from(""))
-    }
-}
-
-impl CollectionId {
-    pub fn try_get_collection_owned(&self) -> Option<Collection> {
-        (STORAGE.collections)().get(self).cloned()
-    }
-    pub fn get_collection_owned(&self) -> Collection {
-        self.try_get_collection_owned().unwrap()
-    }
-    pub fn get_collection(self) -> MappedSignal<Collection> {
-        STORAGE
-            .collections
-            .signal()
-            .map(move |x| x.get(&self).unwrap())
-    }
-    pub fn try_get_mut_collection(&self) -> Option<Write<'static, Collection>> {
-        Write::filter_map(STORAGE.collections.write(), |write| write.get_mut(self))
-    }
-    pub fn get_mut_collection(&self) -> Write<'static, Collection> {
-        self.try_get_mut_collection()
-            .expect("Please ensure this is a valid CollectionId")
     }
 }
 
@@ -149,30 +134,6 @@ impl Collection {
     }
     pub fn entry_path(&self) -> &Path {
         self.entry_path.as_path()
-    }
-    pub fn display_name_owned(self) -> String {
-        self.display_name
-    }
-    pub fn minecraft_version_owned(self) -> VersionMetadata {
-        self.minecraft_version
-    }
-    pub fn mod_controller_owned(self) -> Option<ModController> {
-        self.mod_controller
-    }
-    pub fn created_at_owned(self) -> DateTime<Utc> {
-        self.created_at
-    }
-    pub fn updated_at_owned(self) -> DateTime<Utc> {
-        self.updated_at
-    }
-    pub fn advanced_options_owned(self) -> Option<AdvancedOptions> {
-        self.advanced_options
-    }
-    pub fn picture_path_owned(self) -> PathBuf {
-        self.picture_path
-    }
-    pub fn entry_path_owned(self) -> PathBuf {
-        self.entry_path
     }
 
     pub fn with_mut(&mut self, f: impl FnOnce(CollectionViewMut)) -> anyhow::Result<()> {
@@ -338,14 +299,10 @@ impl Collection {
     }
 
     pub fn get_collection_id(&self) -> CollectionId {
-        let id: Arc<str> = Arc::from(
-            self.entry_path
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .as_ref(),
-        );
-        CollectionId(id)
+        let id = self.entry_path.file_name().unwrap().to_string_lossy();
+        let mut hasher = DefaultHasher::new();
+        id.hash(&mut hasher);
+        CollectionId(hasher.finish())
     }
 
     fn save(&self) -> anyhow::Result<()> {

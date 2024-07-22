@@ -10,7 +10,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use log::{debug, info, warn};
+use dioxus_logger::tracing::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::AsyncBufReadExt;
@@ -75,11 +75,11 @@ impl ProcessorsDataType {
     }
 }
 
-pub fn processers_process<'a>(
+pub fn processers_process(
     mut launch_args: LaunchArgs,
     jvm_options: JvmOptions,
     manifest: Value,
-) -> Result<(LaunchArgs, DownloadArgs<'a>)> {
+) -> Result<(LaunchArgs, DownloadArgs)> {
     let libraries_folder = jvm_options.library_directory.to_string_lossy().to_string();
     let library_manifest = Vec::<ModloaderLibrary>::deserialize(
         manifest
@@ -416,9 +416,13 @@ pub async fn fetch_launch_args_modded(collection: &Collection) -> anyhow::Result
         start: 0.0,
         end: 80.0,
     };
+
+    info!("Fetching game manifest");
     let game_manifest = fetch_game_manifest(&collection.minecraft_version().url).await?;
+    info!("Preping for download");
     let (vanilla_download_args, vanilla_arguments) =
         prepare_vanilla_download(collection, game_manifest.clone()).await?;
+    info!("Starts buffered downloading");
     execute_and_progress(
         collection_id.clone(),
         vanilla_download_args,

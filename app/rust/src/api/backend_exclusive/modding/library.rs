@@ -1,4 +1,5 @@
 use anyhow::anyhow;
+use dioxus::signals::Readable;
 use std::{
     collections::HashSet,
     sync::{
@@ -9,7 +10,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
-use log::{debug, error};
+use dioxus_logger::tracing::{debug, error};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::fs;
@@ -141,7 +142,7 @@ pub async fn prepare_modloader_download<'a>(
     mut launch_args: LaunchArgs,
     jvm_options: JvmOptions,
     game_options: GameOptions,
-) -> Result<(DownloadArgs<'a>, ProcessedArguments, Value)> {
+) -> Result<(DownloadArgs, ProcessedArguments, Value)> {
     let bytes = match mod_loader {
         ModLoaderType::NeoForge => {
             fetch_neoforge_manifest(&game_options.game_version_name, None).await?

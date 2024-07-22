@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use async_recursion::async_recursion;
-use log::error;
+use dioxus_logger::tracing::error;
 use tokio::fs;
 
 use crate::api::backend_exclusive::download::extract_filename;
@@ -91,7 +91,7 @@ impl ModMetadata {
                     .hashes
                     .iter()
                     .filter(|x| x.algo == HashAlgo::Sha1)
-                    .map(|x| x.value.as_ref())
+                    .map(|x| x.value.clone())
                     .collect::<Vec<_>>();
                 let url = file.download_url.as_ref();
                 if url.is_some() {
@@ -251,7 +251,7 @@ impl ModManager {
         }
         let mut handles = HandlesType::new();
         for minecraft_mod in &self.mods {
-            let icon = minecraft_mod.icon_url.as_ref();
+            let icon = minecraft_mod.icon_url.clone();
             let icon_path = minecraft_mod.get_icon_path();
             let current_size_clone = Arc::clone(&current_size);
             handles.push(Box::pin(async move {
@@ -266,9 +266,9 @@ impl ModManager {
             match &minecraft_mod.mod_data {
                 RawModData::Modrinth(minecraft_mod) => {
                     for file in &minecraft_mod.files {
-                        let hash = &file.hashes.sha1;
-                        let url = &file.url;
-                        let filename = &file.filename;
+                        let hash = file.hashes.sha1.clone();
+                        let url = file.url.clone();
+                        let filename = file.filename.clone();
                         let path = base_path.join(filename);
                         let size = file.size;
                         let current_size_clone = Arc::clone(&current_size);
@@ -283,7 +283,7 @@ impl ModManager {
                             };
                             if !path.exists() {
                                 mod_writer(path).await?;
-                            } else if let Err(x) = validate_sha1(&path, hash).await {
+                            } else if let Err(x) = validate_sha1(&path, &hash).await {
                                 error!("{x}");
                                 mod_writer(path).await?;
                             }
@@ -294,15 +294,16 @@ impl ModManager {
                 RawModData::Curseforge { data: file, .. } => {
                     let hashes = file
                         .hashes
-                        .iter()
+                        .clone()
+                        .into_iter()
                         .filter(|x| x.algo == HashAlgo::Sha1)
-                        .map(|x| x.value.as_ref())
+                        .map(|x| x.value)
                         .collect::<Vec<_>>();
                     let url = file
                         .download_url
-                        .as_ref()
+                        .clone()
                         .context("Project disabled mod sharing")?;
-                    let filename = &file.file_name;
+                    let filename = file.file_name.clone();
                     let path = base_path.join(filename);
                     let size = file.file_length;
                     let current_size_clone = Arc::clone(&current_size);
@@ -874,7 +875,7 @@ fn minor_game_check(version: &&VersionMetadata, game_id: &str) -> bool {
         version.id == game_id
     }
 }
-async fn hashes_validate(path: impl AsRef<Path>, vec: &[&str]) -> bool {
+async fn hashes_validate(path: impl AsRef<Path>, vec: &[String]) -> bool {
     let path = path.as_ref();
     tokio_stream::iter(vec)
         .any(|x| async move { validate_sha1(path, x).await.is_ok() })

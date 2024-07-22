@@ -12,13 +12,13 @@ use std::{
 use anyhow::{bail, Context};
 use bytes::{BufMut, Bytes, BytesMut};
 use dioxus::{prelude::spawn, signals::Readable};
-use futures::{future::BoxFuture, StreamExt, TryStreamExt};
-use log::{debug, error};
+use dioxus_logger::tracing::{debug, error};
+use futures::{future::BoxFuture, StreamExt};
 use reqwest::Url;
 use tokio::{
     fs::File,
     io::{AsyncReadExt, BufReader},
-    sync::mpsc::{unbounded_channel, UnboundedSender},
+    task,
     time::{self, Instant},
 };
 
@@ -27,7 +27,7 @@ use crate::api::shared_resources::{
     entry::{DOWNLOAD_PROGRESS, STORAGE},
 };
 
-pub type HandlesType<'a, Out = anyhow::Result<()>> = Vec<BoxFuture<'a, Out>>;
+pub type HandlesType<Out = anyhow::Result<()>> = Vec<BoxFuture<'static, Out>>;
 
 pub async fn download_file(
     url: impl AsRef<str> + Send + Sync,
@@ -307,43 +307,42 @@ impl Default for DownloadBias {
 // does not download stuff when download progress already has it
 pub async fn execute_and_progress(
     id: CollectionId,
-    download_args: DownloadArgs<'_>,
+    download_args: DownloadArgs,
     bias: DownloadBias,
     download_type: DownloadType,
 ) -> anyhow::Result<()> {
     debug!("receiving download request");
-    let handles = download_args.handles;
     let calculate_speed = download_args.is_size;
     let download_complete = Arc::new(AtomicBool::new(false));
 
-    let download = &STORAGE.global_settings.read().download;
-    let max_simultaenous_download = download.max_simultatneous_download;
-
-    let download_complete_clone = Arc::clone(&download_complete);
-    let current_size_clone = Arc::clone(&download_args.current);
-    let total_size_clone = Arc::clone(&download_args.total);
-
-    let (tx, mut rx) = unbounded_channel();
-    spawn(rolling_average(
-        download_type,
-        download_complete_clone,
-        current_size_clone,
-        total_size_clone,
-        id.clone(),
-        bias,
-        calculate_speed,
-        tx,
-    ));
-
     spawn(async move {
-        while let Some((download_id, x)) = rx.recv().await {
-            DOWNLOAD_PROGRESS.write().0.insert(download_id, x);
-        }
+        let handles = download_args.handles;
+        let value = download_type.clone();
+        let download_complete_clone = Arc::clone(&download_complete);
+        let current_size_clone = Arc::clone(&download_args.current);
+        let total_size_clone = Arc::clone(&download_args.total);
+
+        let local = task::LocalSet::new();
+
+        local
+            .run_until(async move {
+                let output = tokio::task::spawn_local(rolling_average(
+                    value,
+                    download_complete_clone,
+                    current_size_clone,
+                    total_size_clone,
+                    id.clone(),
+                    bias,
+                    calculate_speed,
+                ));
+
+                join_futures(handles).await.unwrap();
+
+                download_complete.store(true, Ordering::Release);
+                output.await.unwrap();
+            })
+            .await;
     });
-
-    join_futures(handles, max_simultaenous_download).await?;
-    download_complete.store(true, Ordering::Release);
-
     debug!("finish download request");
     Ok(())
 }
@@ -356,7 +355,6 @@ pub async fn rolling_average(
     id: CollectionId,
     bias: DownloadBias,
     calculate_speed: bool,
-    sender: UnboundedSender<(DownloadId, Progress)>,
 ) {
     let mut instant = Instant::now();
     let mut prev_bytes = 0.;
@@ -383,7 +381,7 @@ pub async fn rolling_average(
                 bias: DownloadBias::default(),
             };
             let download_id = DownloadId::from_progress(id.clone(), &progress);
-            sender.send((download_id, progress)).unwrap();
+            DOWNLOAD_PROGRESS.write().0.insert(download_id, progress);
             return;
         }
 
@@ -398,8 +396,7 @@ pub async fn rolling_average(
             }
 
             let average_speed = average_speed.iter().sum::<f64>() / average_speed.len() as f64;
-            // let global_settings = STORAGE().global_settings;
-            // let speed_limit = global_settings.download.download_speed_limit.as_ref();
+            debug!("{}", average_speed);
 
             Progress {
                 download_type,
@@ -420,36 +417,41 @@ pub async fn rolling_average(
             }
         };
 
-        if download_complete.load(Ordering::Acquire) {
+        if download_complete.load(Ordering::Relaxed) {
             if !completed {
                 completed = true;
             } else {
                 let download_id = DownloadId::from_progress(id.clone(), &progress);
-                sender.send((download_id, progress)).unwrap();
+                DOWNLOAD_PROGRESS.write().0.insert(download_id, progress);
                 break;
             }
         } else {
             prev_bytes = current;
             instant = Instant::now();
             let download_id = DownloadId::from_progress(id.clone(), &progress);
-            sender.send((download_id, progress)).unwrap();
+            DOWNLOAD_PROGRESS.write().0.insert(download_id, progress);
         }
     }
 }
 
-pub async fn join_futures(
-    handles: HandlesType<'_>,
-    concurrency_limit: usize,
-) -> Result<(), anyhow::Error> {
-    tokio_stream::iter(handles)
-        .buffer_unordered(concurrency_limit)
-        .try_collect()
-        .await
+pub async fn join_futures(handles: HandlesType) -> Result<(), anyhow::Error> {
+    let concurrent_limit = STORAGE
+        .global_settings
+        .read()
+        .download
+        .max_simultatneous_download;
+    let mut download_stream = tokio_stream::iter(handles)
+        .map(|x| tokio::spawn(x))
+        .buffer_unordered(concurrent_limit);
+    while let Some(x) = download_stream.next().await {
+        x??;
+    }
+    Ok(())
 }
 
-pub struct DownloadArgs<'a> {
+pub struct DownloadArgs {
     pub current: Arc<AtomicUsize>,
     pub total: Arc<AtomicUsize>,
-    pub handles: HandlesType<'a>,
+    pub handles: HandlesType,
     pub is_size: bool,
 }

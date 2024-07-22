@@ -1,7 +1,7 @@
 use anyhow::bail;
 use anyhow::{Context, Result};
 use dioxus::signals::Readable;
-use log::{error, info};
+use dioxus_logger::tracing::{error, info};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::{atomic::AtomicUsize, atomic::Ordering, Arc};
@@ -127,10 +127,10 @@ pub struct ProcessedArguments {
     pub game_args: GameOptions,
 }
 
-pub async fn prepare_vanilla_download<'a>(
+pub async fn prepare_vanilla_download(
     collection: &Collection,
     game_manifest: GameManifest,
-) -> Result<(DownloadArgs<'a>, ProcessedArguments)> {
+) -> Result<(DownloadArgs, ProcessedArguments)> {
     let version_id = collection.minecraft_version().id.clone();
     let shared_path = get_global_shared_path();
 
@@ -153,7 +153,11 @@ pub async fn prepare_vanilla_download<'a>(
         .await
         .context("fail to create native directory (vanilla)")?;
 
+    info!("Setting up game flags");
+
     let game_flags = setup_game_flags(game_manifest.arguments.game);
+
+    info!("Setting up jvm flags");
     let jvm_flags = setup_jvm_flags(game_manifest.arguments.jvm);
 
     let (game_options, game_flags) = setup_game_option(
@@ -170,6 +174,7 @@ pub async fn prepare_vanilla_download<'a>(
 
     let client_jar_filename = version_directory.join(extract_filename(&downloads_list.client.url)?);
 
+    info!("Setting up jvm options");
     let jvm_options = setup_jvm_options(
         client_jar_filename.to_string_lossy().to_string(),
         &library_directory,
@@ -177,6 +182,7 @@ pub async fn prepare_vanilla_download<'a>(
         &native_directory,
     )?;
 
+    info!("Setting up jvm rules");
     let (jvm_options, mut jvm_flags) = add_jvm_rules(
         Arc::clone(&library_list),
         &library_directory,
@@ -196,6 +202,7 @@ pub async fn prepare_vanilla_download<'a>(
         Arc::clone(&jvm_options.native_directory),
     );
 
+    info!("Preping library downloading");
     let total_size = Arc::new(AtomicUsize::new(0));
     parallel_library(
         Arc::clone(&library_list),
@@ -207,6 +214,7 @@ pub async fn prepare_vanilla_download<'a>(
     )
     .await?;
 
+    info!("Downloads client jar");
     if !client_jar_filename.exists() {
         total_size.fetch_add(downloads_list.client.size, Ordering::Relaxed);
         let bytes = download_file(&downloads_list.client.url, Arc::clone(&current_size)).await?;
@@ -218,6 +226,7 @@ pub async fn prepare_vanilla_download<'a>(
         fs::write(client_jar_filename, &bytes).await?;
     }
 
+    info!("Preping for assets download");
     let asset_settings = extract_assets(&game_manifest.asset_index, asset_directory).await?;
     parallel_assets_download(asset_settings, &current_size, &total_size, &mut handles).await?;
 
@@ -232,6 +241,8 @@ pub async fn prepare_vanilla_download<'a>(
         main_class: game_manifest.main_class,
         game_args: game_flags.arguments,
     };
+
+    info!("Finished vanilla preping");
 
     Ok((
         DownloadArgs {

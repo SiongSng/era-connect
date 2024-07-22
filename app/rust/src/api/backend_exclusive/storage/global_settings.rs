@@ -1,7 +1,6 @@
 use std::{borrow::Cow, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
-use struct_key_value_pair::VariantStruct;
 
 use super::storage_loader::{StorageInstance, StorageLoader};
 
@@ -88,7 +87,7 @@ pub enum DarkLightMode {
     Light,
 }
 
-#[derive(Serialize, Deserialize, Default, Clone, Debug, VariantStruct, PartialEq)]
+#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct UILayout {
     pub completed_setup: bool,

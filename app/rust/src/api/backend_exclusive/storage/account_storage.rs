@@ -1,7 +1,6 @@
 use std::borrow::Cow;
 
 use serde::{Deserialize, Serialize};
-use struct_key_value_pair::VariantStruct;
 use uuid::Uuid;
 
 use crate::api::shared_resources::authentication::account::MinecraftAccount;
@@ -10,7 +9,7 @@ use super::storage_loader::{StorageInstance, StorageLoader};
 
 const ACCOUNT_FILE_NAME: &str = "accounts.json";
 
-#[derive(Serialize, Deserialize, Default, Clone, Debug, VariantStruct, PartialEq)]
+#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct AccountStorage {
     pub accounts: Vec<MinecraftAccount>,
