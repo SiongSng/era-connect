@@ -276,7 +276,7 @@ fn add_jvm_rules(
 
     let mut parsed_library_list = Vec::new();
     for library in library_list.iter() {
-        let (process_native, is_native_library, _) = os_match(library, &current_os_type);
+        let (process_native, is_native_library, _) = os_match(library, current_os_type);
         if !process_native && !is_native_library {
             parsed_library_list.push(library);
         }

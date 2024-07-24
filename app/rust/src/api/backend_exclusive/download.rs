@@ -11,7 +11,7 @@ use std::{
 
 use anyhow::{bail, Context};
 use bytes::{BufMut, Bytes, BytesMut};
-use dioxus::{prelude::spawn, signals::Readable};
+use dioxus::signals::Readable;
 use dioxus_logger::tracing::{debug, error};
 use futures::{future::BoxFuture, StreamExt};
 use reqwest::Url;
@@ -315,34 +315,32 @@ pub async fn execute_and_progress(
     let calculate_speed = download_args.is_size;
     let download_complete = Arc::new(AtomicBool::new(false));
 
-    spawn(async move {
-        let handles = download_args.handles;
-        let value = download_type.clone();
-        let download_complete_clone = Arc::clone(&download_complete);
-        let current_size_clone = Arc::clone(&download_args.current);
-        let total_size_clone = Arc::clone(&download_args.total);
+    let handles = download_args.handles;
+    let value = download_type.clone();
+    let download_complete_clone = Arc::clone(&download_complete);
+    let current_size_clone = Arc::clone(&download_args.current);
+    let total_size_clone = Arc::clone(&download_args.total);
 
-        let local = task::LocalSet::new();
+    let local = task::LocalSet::new();
 
-        local
-            .run_until(async move {
-                let output = tokio::task::spawn_local(rolling_average(
-                    value,
-                    download_complete_clone,
-                    current_size_clone,
-                    total_size_clone,
-                    id.clone(),
-                    bias,
-                    calculate_speed,
-                ));
+    local
+        .run_until(async move {
+            let output = tokio::task::spawn_local(rolling_average(
+                value,
+                download_complete_clone,
+                current_size_clone,
+                total_size_clone,
+                id.clone(),
+                bias,
+                calculate_speed,
+            ));
 
-                join_futures(handles).await.unwrap();
+            join_futures(handles).await.unwrap();
 
-                download_complete.store(true, Ordering::Release);
-                output.await.unwrap();
-            })
-            .await;
-    });
+            download_complete.store(true, Ordering::Release);
+            output.await.unwrap();
+        })
+        .await;
     debug!("finish download request");
     Ok(())
 }

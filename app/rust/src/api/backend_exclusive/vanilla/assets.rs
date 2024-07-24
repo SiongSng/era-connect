@@ -103,40 +103,41 @@ pub async fn parallel_assets_download(
         let asset_download_size = Arc::clone(&asset_download_size);
         let asset_download_hash = Arc::clone(&asset_download_hash);
         let asset_download_paths = Arc::clone(&asset_download_path);
-        handles.push(Box::pin(async move {
-            let asset_download_path = asset_download_paths
-                .get(index)
-                .context("can't get asset_download_path index")?;
-            fs::create_dir_all(
-                asset_download_path
-                    .parent()
-                    .context("can't find asset_download's parent dir")?,
+        let asset_download_path = &asset_download_paths[index];
+        fs::create_dir_all(
+            asset_download_path
+                .parent()
+                .context("can't find asset_download's parent dir")?,
+        )
+        .await?;
+        let okto_download = if asset_download_path.exists() {
+            if let Err(x) = validate_sha1(
+                asset_download_path,
+                asset_download_hash
+                    .get(index)
+                    .context("Can't get asset download hash")?,
             )
-            .await?;
-            let okto_download = if asset_download_path.exists() {
-                if let Err(x) = validate_sha1(
-                    asset_download_path,
-                    asset_download_hash
-                        .get(index)
-                        .context("Can't get asset download hash")?,
-                )
-                .await
-                {
-                    error!("{x}, \nredownloading.");
-                    true
-                } else {
-                    false
-                }
-            } else {
+            .await
+            {
+                error!("{x}, \nredownloading.");
                 true
-            };
+            } else {
+                false
+            }
+        } else {
+            true
+        };
+        if okto_download {
+            total_size.fetch_add(
+                *asset_download_size
+                    .get(index)
+                    .context("Can't get asset download size")?,
+                Ordering::Relaxed,
+            );
+        }
+        let asset_download_path = asset_download_path.clone();
+        handles.push(Box::pin(async move {
             if okto_download {
-                total_size.fetch_add(
-                    *asset_download_size
-                        .get(index)
-                        .context("Can't get asset download size")?,
-                    Ordering::Relaxed,
-                );
                 let bytes = download_file(
                     asset_download_list
                         .get(index)

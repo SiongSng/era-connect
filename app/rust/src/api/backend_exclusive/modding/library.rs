@@ -1,5 +1,4 @@
 use anyhow::anyhow;
-use dioxus::signals::Readable;
 use std::{
     collections::HashSet,
     sync::{
@@ -192,17 +191,21 @@ pub async fn prepare_modloader_download<'a>(
             if library.include_in_classpath {
                 classpath.insert(path.to_string_lossy().to_string());
             }
+            if !path.exists() {
+                fs::create_dir_all(path.parent().context("forge library path doesn't exist")?)
+                    .await?;
+                total_size_clone.fetch_add(artifact.size, Ordering::Relaxed);
+            } else if let Err(err) = validate_sha1(&path, &sha1).await {
+                total_size_clone.fetch_add(artifact.size, Ordering::Relaxed);
+                error!("{err}\n redownloading");
+            }
 
             handles.push(Box::pin(async move {
                 if !path.exists() {
-                    fs::create_dir_all(path.parent().context("forge library path doesn't exist")?)
-                        .await?;
                     total_size_clone.fetch_add(artifact.size, Ordering::Relaxed);
                     let bytes = download_file(&url, current_size_clone).await?;
                     fs::write(path, bytes).await.map_err(|err| anyhow!(err))
-                } else if let Err(err) = validate_sha1(&path, &sha1).await {
-                    total_size_clone.fetch_add(artifact.size, Ordering::Relaxed);
-                    error!("{err}\n redownloading");
+                } else if let Err(_) = validate_sha1(&path, &sha1).await {
                     let bytes = download_file(&url, current_size_clone).await?;
                     fs::write(path, bytes).await.map_err(|err| anyhow!(err))
                 } else {

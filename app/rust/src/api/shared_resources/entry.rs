@@ -38,11 +38,6 @@ impl DownloadProgress {
     fn new() -> Self {
         Self(BTreeMap::new())
     }
-
-    pub fn get_all(self) -> Vec<Progress> {
-        // self.0.into_iter().collect::<BTreeMap<_, _>>();
-        self.0.into_values().collect()
-    }
 }
 
 pub fn get_skin_file_path(skin: MinecraftSkin) -> String {

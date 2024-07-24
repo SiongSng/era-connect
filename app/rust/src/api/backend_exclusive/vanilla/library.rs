@@ -7,11 +7,9 @@ use std::{
 };
 
 use anyhow::{bail, Context, Result};
-use dioxus_logger::tracing::{debug, error};
+use dioxus_logger::tracing::error;
 use serde::{Deserialize, Serialize};
 use tokio::fs;
-
-use anyhow::anyhow;
 
 use crate::api::backend_exclusive::download::{download_file, validate_sha1, HandlesType};
 
@@ -37,7 +35,7 @@ pub struct LibraryArtifact {
     pub artifact: Metadata,
 }
 
-pub fn os_match<'a>(library: &Library, current_os_type: &'a OsName) -> (bool, bool, &'a str) {
+pub fn os_match(library: &Library, current_os_type: OsName) -> (bool, bool, &str) {
     let mut process_native = false;
     let mut is_native_library = false;
     let mut library_extension_type = "";
@@ -45,7 +43,7 @@ pub fn os_match<'a>(library: &Library, current_os_type: &'a OsName) -> (bool, bo
         for x in rule {
             if let Some(os) = &x.os {
                 if let Some(name) = os.name {
-                    if current_os_type == &name && x.action == ActionType::Allow {
+                    if current_os_type == name && x.action == ActionType::Allow {
                         process_native = true;
                     }
                     is_native_library = true;
@@ -84,55 +82,62 @@ pub async fn parallel_library(
         let native_folder = Arc::clone(&native_folder);
         let total_size = Arc::clone(&total_size);
         let current_size = Arc::clone(&current_size);
-        let handle = Box::pin(async move {
-            let library = library_list.get(index).unwrap();
-            let path = library.downloads.artifact.path.clone();
-            let (process_native, is_native_library, library_extension) =
-                os_match(library, &current_os_type);
-            if let Some(ref path) = path {
-                let non_native_download_path = folder.join(&path);
-                let non_native_redownload = if non_native_download_path.exists() {
-                    if let Err(x) = if !process_native && !is_native_library {
-                        validate_sha1(&non_native_download_path, &library.downloads.artifact.sha1)
-                            .await
-                    } else {
-                        Ok(())
-                    } {
-                        error!("{x}, \nredownloading.");
-                        true
-                    } else {
-                        false
-                    }
+        let current_os = current_os_type.clone();
+        let library = &library_list[index];
+        let path = library.downloads.artifact.path.clone();
+        let (process_native, is_native_library, library_extension) = os_match(&library, current_os);
+        if let Some(path) = &path {
+            let non_native_download_path = folder.join(&path);
+            let non_native_redownload = if non_native_download_path.exists() {
+                if let Err(x) = if !process_native && !is_native_library {
+                    validate_sha1(&non_native_download_path, &library.downloads.artifact.sha1).await
                 } else {
+                    Ok(())
+                } {
+                    error!("{x}, \nredownloading.");
                     true
-                };
-
-                debug!("Starts downloading general libraries {}", library.name);
-                if !process_native && non_native_redownload {
-                    total_size.fetch_add(library.downloads.artifact.size, Ordering::Relaxed);
-                    let parent_dir = non_native_download_path
-                        .parent()
-                        .context("Can't find parent of non_native_download_path")?;
-                    fs::create_dir_all(parent_dir)
-                        .await
-                        .context("Fail to create parent dir(library)")?;
-                    let url = &library.downloads.artifact.url;
-                    let bytes = download_file(url, Arc::clone(&current_size)).await?;
-                    fs::write(&non_native_download_path, bytes)
-                        .await
-                        .map_err(|err| anyhow!(err))?;
+                } else {
+                    false
                 }
-                debug!("Starts downloading native libraries {}", library.name);
+            } else {
+                true
+            };
+
+            if !process_native && non_native_redownload {
+                let parent_dir = non_native_download_path
+                    .parent()
+                    .context("Can't find parent of non_native_download_path")?;
+                fs::create_dir_all(parent_dir)
+                    .await
+                    .context("Fail to create parent dir(library)")?;
+                total_size.fetch_add(library.downloads.artifact.size, Ordering::Relaxed);
+            }
+            if process_native {
+                total_size.fetch_add(library.downloads.artifact.size, Ordering::Relaxed);
+            }
+
+            let url = library.downloads.artifact.url.clone();
+            let library_extension = library_extension.to_string();
+
+            let handle = Box::pin(async move {
+                if !process_native && non_native_redownload {
+                    let bytes = download_file(url.clone(), Arc::clone(&current_size)).await?;
+                    fs::write(&non_native_download_path, bytes).await?;
+                }
                 // always download(kinda required for now.)
                 if process_native {
-                    let url = &library.downloads.artifact.url;
-                    total_size.fetch_add(library.downloads.artifact.size, Ordering::Relaxed);
-                    native_download(url, current_size, native_folder, library_extension).await?;
+                    native_download(
+                        &url.clone(),
+                        current_size,
+                        native_folder,
+                        &library_extension,
+                    )
+                    .await?;
                 }
-            }
-            Ok::<_, anyhow::Error>(())
-        });
-        library_download_handles.push(handle);
+                Ok::<_, anyhow::Error>(())
+            });
+            library_download_handles.push(handle);
+        }
     }
 
     Ok(())
