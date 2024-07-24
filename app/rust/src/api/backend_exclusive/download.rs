@@ -11,7 +11,7 @@ use std::{
 
 use anyhow::{bail, Context};
 use bytes::{BufMut, Bytes, BytesMut};
-use dioxus::signals::Readable;
+use dioxus::{dioxus_core::SpawnIfAsync, prelude::spawn, signals::Readable};
 use dioxus_logger::tracing::{debug, error};
 use futures::{future::BoxFuture, StreamExt};
 use reqwest::Url;
@@ -321,26 +321,31 @@ pub async fn execute_and_progress(
     let current_size_clone = Arc::clone(&download_args.current);
     let total_size_clone = Arc::clone(&download_args.total);
 
-    let local = task::LocalSet::new();
+    let handle = async move {
+        async move {
+            let local = task::LocalSet::new();
+            local
+                .run_until(async move {
+                    let output = tokio::task::spawn_local(rolling_average(
+                        value,
+                        download_complete_clone,
+                        current_size_clone,
+                        total_size_clone,
+                        id.clone(),
+                        bias,
+                        calculate_speed,
+                    ));
 
-    local
-        .run_until(async move {
-            let output = tokio::task::spawn_local(rolling_average(
-                value,
-                download_complete_clone,
-                current_size_clone,
-                total_size_clone,
-                id.clone(),
-                bias,
-                calculate_speed,
-            ));
+                    join_futures(handles).await.unwrap();
 
-            join_futures(handles).await.unwrap();
+                    download_complete.store(true, Ordering::Release);
+                    output.await.unwrap();
+                })
+                .await;
+        }
+    };
+    handle.spawn().await.await;
 
-            download_complete.store(true, Ordering::Release);
-            output.await.unwrap();
-        })
-        .await;
     debug!("finish download request");
     Ok(())
 }
