@@ -317,7 +317,7 @@ impl Collection {
             .entry(self.get_collection_id())
             .and_modify(|x| {
                 if x != self {
-                    *x = x.clone();
+                    *x = self.clone();
                 }
             })
             .or_insert(self.clone());
