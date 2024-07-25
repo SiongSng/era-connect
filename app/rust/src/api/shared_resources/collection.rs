@@ -250,7 +250,7 @@ impl Collection {
     pub async fn download_mods(&self) -> anyhow::Result<()> {
         let id = self.get_collection_id();
         if let Some(mod_manager) = self.mod_manager() {
-            let download_args = mod_manager.get_download()?;
+            let download_args = mod_manager.get_download().await?;
             execute_and_progress(
                 id,
                 download_args,
@@ -277,14 +277,8 @@ impl Collection {
 
     /// Downloads game(also verifies)
     pub async fn verify_and_download_game(&self) -> anyhow::Result<LaunchArgs> {
-        if let Some(mod_loader) = self.mod_loader() {
-            match mod_loader.mod_loader_type {
-                ModLoaderType::Forge
-                | ModLoaderType::NeoForge
-                | ModLoaderType::Quilt
-                | ModLoaderType::Fabric => fetch_launch_args_modded(self).await,
-                // _ => bail!("Modloader not yet implemented"),
-            }
+        if self.mod_loader().is_some() {
+            fetch_launch_args_modded(self).await
         } else {
             full_vanilla_download(self).await
         }
@@ -399,9 +393,9 @@ impl Collection {
                     let path = collection_base_dir.join(&base_entry_path);
                     let loader = StorageLoader::new(file_name.clone(), Cow::Borrowed(&path));
                     let mut collection = loader.load::<Collection>()?;
+                    let entry_name = collection.entry_path.file_name().unwrap().to_string_lossy();
 
-                    // block_on(collection.mod_manager.scan())?;
-                    info!("Succesfully scanned the mods");
+                    info!("Collection {entry_name} is read");
                     if collection.entry_path != path {
                         collection.entry_path = path;
                         loader.save(&collection)?;
@@ -433,10 +427,10 @@ impl ModLoader {
 impl ToString for ModLoader {
     fn to_string(&self) -> String {
         match self.mod_loader_type {
-            ModLoaderType::Forge => String::from("forge"),
-            ModLoaderType::NeoForge => String::from("neoforge"),
-            ModLoaderType::Fabric => String::from("fabric"),
-            ModLoaderType::Quilt => String::from("quilt"),
+            ModLoaderType::Forge => String::from("Forge"),
+            ModLoaderType::NeoForge => String::from("Neoforge"),
+            ModLoaderType::Fabric => String::from("Fabric"),
+            ModLoaderType::Quilt => String::from("Quilt"),
         }
     }
 }

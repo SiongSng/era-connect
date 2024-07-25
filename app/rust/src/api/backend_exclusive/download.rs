@@ -16,7 +16,7 @@ use dioxus_logger::tracing::{debug, error};
 use futures::{future::BoxFuture, StreamExt};
 use reqwest::Url;
 use tokio::{
-    fs::File,
+    fs::{self, File},
     io::{AsyncReadExt, BufReader},
     task,
     time::{self, Instant},
@@ -28,6 +28,16 @@ use crate::api::shared_resources::{
 };
 
 pub type HandlesType<Out = anyhow::Result<()>> = Vec<BoxFuture<'static, Out>>;
+
+pub async fn save_url(
+    url: impl AsRef<str> + Send + Sync,
+    current_size: impl Into<Option<Arc<AtomicUsize>>>,
+    filename: impl AsRef<Path>,
+) -> anyhow::Result<()> {
+    let bytes = download_file(url, current_size).await?;
+    fs::write(filename, &bytes).await?;
+    Ok(())
+}
 
 pub async fn download_file(
     url: impl AsRef<str> + Send + Sync,

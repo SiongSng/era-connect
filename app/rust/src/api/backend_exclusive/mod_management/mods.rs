@@ -1,4 +1,5 @@
 use anyhow::bail;
+use dioxus_logger::tracing::warn;
 use ferinth::structures::search::Facet;
 use ferinth::structures::search::Sort;
 use ferinth::structures::version::DependencyType;
@@ -24,6 +25,7 @@ use dioxus_logger::tracing::error;
 use tokio::fs;
 
 use crate::api::backend_exclusive::download::extract_filename;
+use crate::api::backend_exclusive::download::save_url;
 use crate::api::backend_exclusive::vanilla::version::get_version_manifest;
 use crate::api::backend_exclusive::vanilla::version::VersionMetadata;
 use crate::api::shared_resources::collection::ModLoader;
@@ -238,7 +240,7 @@ impl ModManager {
             .await
     }
 
-    pub fn get_download(&self) -> anyhow::Result<DownloadArgs> {
+    pub async fn get_download(&self) -> anyhow::Result<DownloadArgs> {
         let current_size = Arc::new(AtomicUsize::new(0));
         let total_size = Arc::new(AtomicUsize::new(0));
         let base_path = self.game_directory.join("mods");
@@ -257,11 +259,10 @@ impl ModManager {
             handles.push(Box::pin(async move {
                 if let (Some(icon), Some(icon_path)) = (icon, icon_path) {
                     if !icon_path.exists() {
-                        let bytes = download_file(icon, Some(current_size_clone)).await?;
-                        fs::write(icon_path, bytes).await?;
+                        save_url(icon, current_size_clone, icon_path).await?;
                     }
                 }
-                Ok::<(), anyhow::Error>(())
+                Ok(())
             }));
             match &minecraft_mod.mod_data {
                 RawModData::Modrinth(minecraft_mod) => {
@@ -269,26 +270,19 @@ impl ModManager {
                         let hash = file.hashes.sha1.clone();
                         let url = file.url.clone();
                         let filename = file.filename.clone();
-                        let path = base_path.join(filename);
+                        let path = base_path.join(filename.clone());
                         let size = file.size;
                         let current_size_clone = Arc::clone(&current_size);
                         let total_size_clone = Arc::clone(&total_size);
-                        handles.push(Box::pin(async move {
-                            let mod_writer = |path| async move {
-                                total_size_clone.fetch_add(size, Ordering::Relaxed);
-                                let bytes =
-                                    download_file(url, Some(current_size_clone.clone())).await?;
-                                fs::write(path, bytes).await?;
-                                Ok::<(), anyhow::Error>(())
-                            };
-                            if !path.exists() {
-                                mod_writer(path).await?;
-                            } else if let Err(x) = validate_sha1(&path, &hash).await {
-                                error!("{x}");
-                                mod_writer(path).await?;
-                            }
-                            Ok(())
-                        }));
+                        let mod_writer = save_url(url, current_size_clone, path.clone());
+                        if !path.exists() {
+                            total_size_clone.fetch_add(size, Ordering::Relaxed);
+                            handles.push(Box::pin(mod_writer));
+                        } else if let Err(x) = validate_sha1(&path, &hash).await {
+                            warn!("Redownloading {x}");
+                            total_size_clone.fetch_add(size, Ordering::Relaxed);
+                            handles.push(Box::pin(mod_writer));
+                        }
                     }
                 }
                 RawModData::Curseforge { data: file, .. } => {
@@ -308,18 +302,14 @@ impl ModManager {
                     let size = file.file_length;
                     let current_size_clone = Arc::clone(&current_size);
                     let total_size_clone = Arc::clone(&total_size);
-                    handles.push(Box::pin(async move {
-                        if !path.exists() {
-                            total_size_clone.fetch_add(size, Ordering::Relaxed);
-                            let bytes = download_file(url, Some(current_size_clone)).await?;
-                            fs::write(path, bytes).await?;
-                        } else if !hashes_validate(&path, &hashes).await {
-                            total_size_clone.fetch_add(size, Ordering::Relaxed);
-                            let bytes = download_file(url, Some(current_size_clone)).await?;
-                            fs::write(path, bytes).await?;
-                        }
-                        Ok(())
-                    }));
+                    let mod_writer = save_url(url, current_size_clone, path.clone());
+                    if !path.exists() {
+                        total_size_clone.fetch_add(size, Ordering::Relaxed);
+                        handles.push(Box::pin(mod_writer));
+                    } else if !hashes_validate(&path, &hashes).await {
+                        total_size_clone.fetch_add(size, Ordering::Relaxed);
+                        handles.push(Box::pin(mod_writer));
+                    }
                 }
             }
         }

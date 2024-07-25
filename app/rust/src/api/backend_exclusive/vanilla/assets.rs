@@ -9,7 +9,9 @@ use std::{
 };
 use tokio::fs;
 
-use crate::api::backend_exclusive::download::{download_file, validate_sha1, HandlesType};
+use crate::api::backend_exclusive::download::{
+    download_file, save_url, validate_sha1, HandlesType,
+};
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Default, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -38,15 +40,15 @@ pub async fn extract_assets(asset_index: &AssetIndex, folder: PathBuf) -> Result
         let b: &[u8] = &fs::read(asset_index_path).await?;
         serde_json::from_slice(b)?
     } else {
-        let asset_response_bytes = download_file(&asset_index.url, None).await?;
         fs::create_dir_all(
             asset_index_path
                 .parent()
                 .context("Failed to create asset dir(impossible)")?,
         )
         .await?;
-        fs::write(&asset_index_path, &asset_response_bytes).await?;
-        serde_json::from_slice(&asset_response_bytes)?
+        let bytes = download_file(&asset_index.url, None).await?;
+        fs::write(asset_index_path, &bytes).await?;
+        serde_json::from_slice(&bytes)?
     };
     let asset_objects = asset_index_content
         .get("objects")

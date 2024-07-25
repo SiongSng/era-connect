@@ -11,7 +11,9 @@ use super::assets::{extract_assets, parallel_assets_download};
 use super::library::{os_match, parallel_library, Library};
 use super::manifest::{self, Argument, GameManifest};
 use super::rules::{ActionType, OsName};
-use crate::api::backend_exclusive::download::{execute_and_progress, DownloadBias, DownloadType};
+use crate::api::backend_exclusive::download::{
+    execute_and_progress, save_url, DownloadBias, DownloadType,
+};
 use crate::api::backend_exclusive::vanilla::manifest::fetch_game_manifest;
 use crate::api::backend_exclusive::{
     download::{download_file, extract_filename, validate_sha1, DownloadArgs},
@@ -217,13 +219,21 @@ pub async fn prepare_vanilla_download(
     info!("Downloads client jar");
     if !client_jar_filename.exists() {
         total_size.fetch_add(downloads_list.client.size, Ordering::Relaxed);
-        let bytes = download_file(&downloads_list.client.url, Arc::clone(&current_size)).await?;
-        fs::write(client_jar_filename, &bytes).await?;
+        let current_size = Arc::clone(&current_size);
+        handles.push(Box::pin(save_url(
+            downloads_list.client.url,
+            current_size,
+            client_jar_filename,
+        )));
     } else if let Err(x) = validate_sha1(&client_jar_filename, &downloads_list.client.sha1).await {
         total_size.fetch_add(downloads_list.client.size, Ordering::Relaxed);
         error!("{x}\n redownloading.");
-        let bytes = download_file(&downloads_list.client.url, Arc::clone(&current_size)).await?;
-        fs::write(client_jar_filename, &bytes).await?;
+        let current_size = Arc::clone(&current_size);
+        handles.push(Box::pin(save_url(
+            downloads_list.client.url,
+            current_size,
+            client_jar_filename,
+        )));
     }
 
     info!("Preping for assets download");
