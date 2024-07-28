@@ -1,11 +1,10 @@
-use anyhow::bail;
-use anyhow::{Context, Result};
 use dioxus::signals::Readable;
 use dioxus_logger::tracing::{error, info};
+use futures::TryFutureExt;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{atomic::AtomicUsize, atomic::Ordering, Arc};
-use tokio::fs::{self, create_dir_all};
+use tokio::fs::create_dir_all;
 
 use super::assets::{extract_assets, parallel_assets_download};
 use super::library::{os_match, parallel_library, Library};
@@ -14,13 +13,16 @@ use super::rules::{ActionType, OsName};
 use crate::api::backend_exclusive::download::{
     execute_and_progress, save_url, DownloadBias, DownloadType,
 };
+use crate::api::backend_exclusive::errors::ManifestProcessingError;
+use crate::api::backend_exclusive::errors::*;
 use crate::api::backend_exclusive::vanilla::manifest::fetch_game_manifest;
 use crate::api::backend_exclusive::{
-    download::{download_file, extract_filename, validate_sha1, DownloadArgs},
+    download::{extract_filename, validate_sha1, DownloadArgs},
     storage::storage_loader::get_global_shared_path,
 };
 use crate::api::shared_resources::collection::Collection;
 use crate::api::shared_resources::entry::STORAGE;
+use snafu::prelude::*;
 
 #[derive(Debug, PartialEq, Deserialize)]
 struct GameFlagsProcessed {
@@ -85,7 +87,15 @@ pub struct LaunchArgs {
     pub game_args: Vec<String>,
 }
 
-pub async fn launch_game(launch_args: &LaunchArgs) -> Result<()> {
+#[derive(Snafu, Debug)]
+pub enum LaunchGameError {
+    #[snafu(display("Could not read tokio spawn task"))]
+    TokioSpawnTask { source: std::io::Error },
+    #[snafu(transparent)]
+    ManifestProcessing { source: ManifestProcessingError },
+}
+
+pub async fn launch_game(launch_args: &LaunchArgs) -> Result<(), LaunchGameError> {
     let mut launch_vec = Vec::new();
     launch_vec.extend(&launch_args.jvm_args);
     launch_vec.push(&launch_args.main_class);
@@ -93,10 +103,14 @@ pub async fn launch_game(launch_args: &LaunchArgs) -> Result<()> {
     let b = tokio::process::Command::new("java")
         .args(launch_vec)
         .spawn();
-    b?.wait().await?;
+    b.context(TokioSpawnTaskSnafu)?
+        .wait()
+        .await
+        .context(TokioSpawnTaskSnafu)?;
     Ok(())
 }
-pub async fn full_vanilla_download(collection: &Collection) -> anyhow::Result<LaunchArgs> {
+
+pub async fn full_vanilla_download(collection: &Collection) -> Result<LaunchArgs, LaunchGameError> {
     info!("Starts Vanilla Downloading");
     let collection_id = collection.get_collection_id();
     let vanilla_bias = DownloadBias {
@@ -112,7 +126,7 @@ pub async fn full_vanilla_download(collection: &Collection) -> anyhow::Result<La
         vanilla_bias,
         DownloadType::vanilla(),
     )
-    .await?;
+    .await;
 
     Ok(vanilla_arguments.launch_args)
 }
@@ -132,7 +146,7 @@ pub struct ProcessedArguments {
 pub async fn prepare_vanilla_download(
     collection: &Collection,
     game_manifest: GameManifest,
-) -> Result<(DownloadArgs, ProcessedArguments)> {
+) -> Result<(DownloadArgs, ProcessedArguments), ManifestProcessingError> {
     let version_id = collection.minecraft_version().id.clone();
     let shared_path = get_global_shared_path();
 
@@ -142,18 +156,18 @@ pub async fn prepare_vanilla_download(
     let version_directory = shared_path.join(format!("versions/{version_id}"));
     let native_directory = version_directory.join("natives");
 
-    create_dir_all(&library_directory)
-        .await
-        .context("fail to create library directory (vanilla)")?;
-    create_dir_all(&asset_directory)
-        .await
-        .context("fail to create asset directory (vanilla)")?;
-    create_dir_all(&game_directory)
-        .await
-        .context("fail to create game directory (vanilla)")?;
-    create_dir_all(&native_directory)
-        .await
-        .context("fail to create native directory (vanilla)")?;
+    create_dir_all(&library_directory).await.context(IoSnafu {
+        path: &library_directory,
+    })?;
+    create_dir_all(&asset_directory).await.context(IoSnafu {
+        path: &asset_directory,
+    })?;
+    create_dir_all(&game_directory).await.context(IoSnafu {
+        path: &game_directory,
+    })?;
+    create_dir_all(&native_directory).await.context(IoSnafu {
+        path: &native_directory,
+    })?;
 
     info!("Setting up game flags");
 
@@ -169,12 +183,17 @@ pub async fn prepare_vanilla_download(
         game_manifest.asset_index.id.clone(),
         game_flags,
     )
-    .await?;
+    .await
+    .context(GameOptionsSnafu)?;
 
     let downloads_list = game_manifest.downloads;
     let library_list: Arc<[Library]> = game_manifest.libraries.into();
 
-    let client_jar_filename = version_directory.join(extract_filename(&downloads_list.client.url)?);
+    let client_jar_filename = version_directory.join(
+        extract_filename(&downloads_list.client.url).context(ExtractDownloadingFilenameSnafu {
+            str: &downloads_list.client.url,
+        })?,
+    );
 
     info!("Setting up jvm options");
     let jvm_options = setup_jvm_options(
@@ -191,7 +210,8 @@ pub async fn prepare_vanilla_download(
         &client_jar_filename,
         jvm_options,
         jvm_flags,
-    )?;
+    )
+    .context(JvmRulesSnafu)?;
 
     jvm_flags.arguments = jvm_args_parse(&jvm_flags.arguments, &jvm_options);
 
@@ -220,20 +240,18 @@ pub async fn prepare_vanilla_download(
     if !client_jar_filename.exists() {
         total_size.fetch_add(downloads_list.client.size, Ordering::Relaxed);
         let current_size = Arc::clone(&current_size);
-        handles.push(Box::pin(save_url(
-            downloads_list.client.url,
-            current_size,
-            client_jar_filename,
-        )));
+        handles.push(Box::pin(
+            save_url(downloads_list.client.url, current_size, client_jar_filename)
+                .map_err(Into::into),
+        ));
     } else if let Err(x) = validate_sha1(&client_jar_filename, &downloads_list.client.sha1).await {
         total_size.fetch_add(downloads_list.client.size, Ordering::Relaxed);
         error!("{x}\n redownloading.");
         let current_size = Arc::clone(&current_size);
-        handles.push(Box::pin(save_url(
-            downloads_list.client.url,
-            current_size,
-            client_jar_filename,
-        )));
+        handles.push(Box::pin(
+            save_url(downloads_list.client.url, current_size, client_jar_filename)
+                .map_err(Into::into),
+        ));
     }
 
     info!("Preping for assets download");
@@ -269,20 +287,32 @@ pub async fn prepare_vanilla_download(
     ))
 }
 
+#[derive(Snafu, Debug)]
+pub enum JvmRuleError {
+    #[snafu(display("Os {os} is not supported"))]
+    OsNotSupported { os: String },
+    #[snafu(display("Fails to detect os_version, error: {str}"))]
+    OsDetection { str: String },
+}
+
 fn add_jvm_rules(
     library_list: Arc<[Library]>,
     library_path: impl AsRef<Path>,
     client_jar: impl AsRef<Path>,
     mut jvm_options: JvmOptions,
     jvm_flags: JvmFlagsUnprocessed,
-) -> Result<(JvmOptions, JvmFlagsProcessed), anyhow::Error> {
-    let current_os = os_version::detect()?;
+) -> Result<(JvmOptions, JvmFlagsProcessed), JvmRuleError> {
+    let current_os =
+        os_version::detect().map_err(|x| JvmRuleError::OsDetection { str: x.to_string() })?;
     let current_os_type = match current_os {
-        os_version::OsVersion::Linux(_) => OsName::Linux,
-        os_version::OsVersion::Windows(_) => OsName::Windows,
-        os_version::OsVersion::MacOS(_) => OsName::Osx,
-        _ => bail!("not supported"),
-    };
+        os_version::OsVersion::Linux(_) => Some(OsName::Linux),
+        os_version::OsVersion::Windows(_) => Some(OsName::Windows),
+        os_version::OsVersion::MacOS(_) => Some(OsName::Osx),
+        _ => None,
+    }
+    .context(OsNotSupportedSnafu {
+        os: current_os.to_string(),
+    })?;
 
     let mut parsed_library_list = Vec::new();
     for library in library_list.iter() {
@@ -348,31 +378,24 @@ fn setup_jvm_options(
     library_directory: impl AsRef<Path>,
     game_directory: impl AsRef<Path>,
     native_directory: impl AsRef<Path>,
-) -> Result<JvmOptions, anyhow::Error> {
+) -> Result<JvmOptions, ManifestProcessingError> {
     Ok(JvmOptions {
         launcher_name: String::from("era-connect"),
         launcher_version: String::from("0.0.1"),
         classpath: String::new(),
         classpath_separator: String::from(":"),
         primary_jar: client_jar,
-        library_directory: Arc::from(
-            library_directory
-                .as_ref()
-                .canonicalize()
-                .context("Fail to canonicalize library_directory(jvm_options)")?,
-        ),
-        game_directory: Arc::from(
-            game_directory
-                .as_ref()
-                .canonicalize()
-                .context("Fail to canonicalize game_directory(jvm_options)")?,
-        ),
-        native_directory: Arc::from(
-            native_directory
-                .as_ref()
-                .canonicalize()
-                .context("Fail to canonicalize native_directory(jvm_options)")?,
-        ),
+        library_directory: Arc::from(library_directory.as_ref().canonicalize().context(
+            IoSnafu {
+                path: "Fail to canonicalize library_directory",
+            },
+        )?),
+        game_directory: Arc::from(game_directory.as_ref().canonicalize().context(IoSnafu {
+            path: "Fail to canonicalize game_directory",
+        })?),
+        native_directory: Arc::from(native_directory.as_ref().canonicalize().context(IoSnafu {
+            path: "Fail to canonicalize native_directory",
+        })?),
     })
 }
 
@@ -390,37 +413,44 @@ const fn setup_game_flags(game_arguments: Vec<Argument>) -> GameFlagsUnprocessed
     }
 }
 
+#[derive(Snafu, Debug)]
+pub enum GameOptionError {
+    #[snafu(display("Can't launch game without having main account set"))]
+    NoMainAccount,
+    #[snafu(display("Failed to canonicalization for {path:?}"))]
+    Canonicalization {
+        source: std::io::Error,
+        path: PathBuf,
+    },
+}
+
 async fn setup_game_option(
     current_version: String,
     game_directory: impl AsRef<Path> + Send + Sync,
     asset_directory: impl AsRef<Path> + Send + Sync,
     asset_index_id: String,
     game_flags: GameFlagsUnprocessed,
-) -> Result<(GameOptions, GameFlagsProcessed), anyhow::Error> {
+) -> Result<(GameOptions, GameFlagsProcessed), GameOptionError> {
     let storage = &STORAGE.account_storage.read();
-    let uuid = storage
-        .main_account
-        .context("Can't launch game without main account")?;
+    let uuid = storage.main_account.context(NoMainAccountSnafu)?;
     let minecraft_account = storage
         .accounts
         .iter()
         .find(|x| x.uuid == uuid)
-        .context("Somehow fail to find the main account uuid in accounts")?;
+        .expect("main account not in accounts(should be)");
     let game_options = GameOptions {
         auth_player_name: minecraft_account.username.clone(),
         game_version_name: current_version,
-        game_directory: Arc::from(
-            game_directory
-                .as_ref()
-                .canonicalize()
-                .context("Fail to canonicalize game_directory(game_options)")?,
-        ),
-        assets_root: Arc::from(
-            asset_directory
-                .as_ref()
-                .canonicalize()
-                .context("Fail to canonicalize asset_directory(game_options)")?,
-        ),
+        game_directory: Arc::from(game_directory.as_ref().canonicalize().context(
+            CanonicalizationSnafu {
+                path: game_directory.as_ref(),
+            },
+        )?),
+        assets_root: Arc::from(asset_directory.as_ref().canonicalize().context(
+            CanonicalizationSnafu {
+                path: asset_directory.as_ref(),
+            },
+        )?),
         assets_index_name: asset_index_id,
         auth_access_token: minecraft_account.access_token.token.clone(),
         auth_uuid: uuid.to_string(),

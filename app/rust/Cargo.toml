@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2018"
 
 [dependencies]
-anyhow = { version = "1.0.86", features = ["backtrace"] }
 bytes = "1.6.1"
 dirs = "5.0.1"
 futures = "0.3.30"
@@ -41,3 +40,4 @@ dioxus = { git = "https://github.com/DioxusLabs/dioxus", version = "0.5.2" }
 thiserror = "1.0.63"
 ordermap = "0.5.0"
 dioxus-logger = { git = "https://github.com/DogeDark/dioxus-logger", version = "0.5.1" }
+snafu = "0.8.4"

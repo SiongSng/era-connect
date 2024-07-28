@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::api::shared_resources::authentication::account::MinecraftAccount;
 
-use super::storage_loader::{StorageInstance, StorageLoader};
+use super::storage_loader::{StorageError, StorageInstance, StorageLoader};
 
 const ACCOUNT_FILE_NAME: &str = "accounts.json";
 
@@ -22,7 +22,7 @@ impl StorageInstance<Self> for AccountStorage {
         ACCOUNT_FILE_NAME
     }
 
-    fn save(&self) -> anyhow::Result<()> {
+    fn save(&self) -> Result<(), StorageError> {
         let storage =
             StorageLoader::new(Self::file_name().to_owned(), Cow::Owned(Self::base_path()));
         storage.save(self)

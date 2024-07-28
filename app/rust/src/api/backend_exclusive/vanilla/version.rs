@@ -1,9 +1,8 @@
-use anyhow::Context;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
-use crate::api::backend_exclusive::download::download_file;
+use crate::api::backend_exclusive::{download::download_file, errors::ManifestProcessingError};
 
 const VERSION_MANIFEST_URL: &str = "https://meta.modrinth.com/minecraft/v0/manifest.json";
 
@@ -36,19 +35,18 @@ pub struct VersionMetadata {
 }
 
 impl VersionMetadata {
-    pub async fn from_id(id: &str) -> anyhow::Result<Self> {
-        get_version_manifest()
+    pub async fn from_id(id: &str) -> Result<Option<Self>, ManifestProcessingError> {
+        Ok(get_version_manifest()
             .await?
             .versions
             .iter()
             .find(|x| x.id == id)
-            .context("Can't find version_metadata with this id")
-            .cloned()
+            .cloned())
     }
-    pub async fn latest_release() -> anyhow::Result<Self> {
+    pub async fn latest_release() -> Result<Option<Self>, ManifestProcessingError> {
         Self::from_id(&get_version_manifest().await?.latest.release).await
     }
-    pub async fn latest_snapshot() -> anyhow::Result<Self> {
+    pub async fn latest_snapshot() -> Result<Option<Self>, ManifestProcessingError> {
         Self::from_id(&get_version_manifest().await?.latest.snapshot).await
     }
 }
@@ -73,11 +71,14 @@ impl PartialOrd for VersionMetadata {
     }
 }
 
+use crate::api::backend_exclusive::errors::*;
+use snafu::prelude::*;
+
 static TEMP: RwLock<Option<VersionsManifest>> = RwLock::const_new(None);
 
-pub async fn get_version_manifest() -> anyhow::Result<VersionsManifest> {
+pub async fn get_version_manifest() -> Result<VersionsManifest, ManifestProcessingError> {
     let response = download_file(VERSION_MANIFEST_URL, None).await?;
-    let slice = serde_json::from_slice(&response)?;
+    let slice = serde_json::from_slice(&response).context(DesearializationSnafu)?;
     let slice = TEMP.write().await.get_or_insert_with(|| slice).clone();
     Ok(slice)
 }

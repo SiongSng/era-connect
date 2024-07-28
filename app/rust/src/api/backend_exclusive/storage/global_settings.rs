@@ -2,7 +2,7 @@ use std::{borrow::Cow, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use super::storage_loader::{StorageInstance, StorageLoader};
+use super::storage_loader::{StorageError, StorageInstance, StorageLoader};
 
 const GLOBAL_SETTINGS_FILENAME: &str = "global_setings.json";
 
@@ -18,7 +18,7 @@ impl StorageInstance<Self> for GlobalSettings {
         GLOBAL_SETTINGS_FILENAME
     }
 
-    fn save(&self) -> anyhow::Result<()> {
+    fn save(&self) -> Result<(), StorageError> {
         let storage =
             StorageLoader::new(Self::file_name().to_owned(), Cow::Owned(Self::base_path()));
         storage.save(self)

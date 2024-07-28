@@ -1,16 +1,16 @@
-use anyhow::{anyhow, Context, Result};
 use dioxus_logger::tracing::{debug, error};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use snafu::prelude::*;
 use std::{
-    convert::TryInto,
     path::PathBuf,
     sync::{atomic::AtomicUsize, atomic::Ordering, Arc},
 };
 use tokio::fs;
 
-use crate::api::backend_exclusive::download::{
-    download_file, save_url, validate_sha1, HandlesType,
+use crate::api::backend_exclusive::{
+    download::{download_file, validate_sha1, HandlesType},
+    errors::*,
 };
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Default, Clone)]
@@ -30,31 +30,37 @@ pub struct AssetSettings {
     pub asset_download_size: Vec<usize>,
 }
 
-pub async fn extract_assets(asset_index: &AssetIndex, folder: PathBuf) -> Result<AssetSettings> {
+pub async fn extract_assets(
+    asset_index: &AssetIndex,
+    folder: PathBuf,
+) -> Result<AssetSettings, ManifestProcessingError> {
     let asset_index_path = folder.join(PathBuf::from(format!("indexes/{}.json", &asset_index.id)));
     let asset_index_content: Value = if asset_index_path.exists()
         && validate_sha1(&asset_index_path, asset_index.sha1.as_str())
             .await
             .is_ok()
     {
-        let b: &[u8] = &fs::read(asset_index_path).await?;
-        serde_json::from_slice(b)?
+        let b: &[u8] = &fs::read(&asset_index_path).await.context(IoSnafu {
+            path: asset_index_path,
+        })?;
+        serde_json::from_slice(b).context(DesearializationSnafu)?
     } else {
-        fs::create_dir_all(
-            asset_index_path
-                .parent()
-                .context("Failed to create asset dir(impossible)")?,
-        )
-        .await?;
+        let path = asset_index_path.parent().context(AssetPathParentSnafu)?;
+        fs::create_dir_all(path).await.context(IoSnafu { path })?;
         let bytes = download_file(&asset_index.url, None).await?;
-        fs::write(asset_index_path, &bytes).await?;
-        serde_json::from_slice(&bytes)?
+        fs::write(&asset_index_path, &bytes)
+            .await
+            .context(IoSnafu {
+                path: asset_index_path,
+            })?;
+        serde_json::from_slice(&bytes).context(DesearializationSnafu)?
     };
     let asset_objects = asset_index_content
         .get("objects")
-        .context("fail to get content[objects]")?
-        .as_object()
-        .context("Failure to parse asset_index_content[objects]")?;
+        .and_then(|x| x.as_object())
+        .context(ManifestLookUpSnafu {
+            key: "asset_index_contet[objects]",
+        })?;
     let mut asset_download_list = Vec::new();
     let mut asset_download_hash = Vec::new();
     let mut asset_download_path = Vec::new();
@@ -62,16 +68,16 @@ pub async fn extract_assets(asset_index: &AssetIndex, folder: PathBuf) -> Result
     for (_, val) in asset_objects {
         let size = val
             .get("size")
-            .context("size doesn't exist!")?
-            .as_u64()
-            .context("size is not u64")?
-            .try_into()
-            .context("val[size] u64 to usize fail!")?;
+            .and_then(|x| x.as_u64())
+            .context(ManifestLookUpSnafu {
+                key: "asset_objects[_][size]",
+            })? as usize;
         let hash = val
             .get("hash")
-            .context("hash doesn't exist!")?
-            .as_str()
-            .context("asset hash is not a string")?;
+            .and_then(|x| x.as_str())
+            .context(ManifestLookUpSnafu {
+                key: "asset_objects[_][hash]",
+            })?;
         asset_download_list.push(format!(
             "https://resources.download.minecraft.net/{hash:.2}/{hash}",
         ));
@@ -92,7 +98,7 @@ pub async fn parallel_assets_download(
     current_size: &Arc<AtomicUsize>,
     total_size: &Arc<AtomicUsize>,
     handles: &mut HandlesType,
-) -> Result<()> {
+) -> Result<(), ManifestProcessingError> {
     let asset_download_list = Arc::new(assets.asset_download_list);
     let asset_download_hash = Arc::new(assets.asset_download_hash);
     let asset_download_path = Arc::new(assets.asset_download_path);
@@ -106,18 +112,17 @@ pub async fn parallel_assets_download(
         let asset_download_hash = Arc::clone(&asset_download_hash);
         let asset_download_paths = Arc::clone(&asset_download_path);
         let asset_download_path = &asset_download_paths[index];
-        fs::create_dir_all(
-            asset_download_path
-                .parent()
-                .context("can't find asset_download's parent dir")?,
-        )
-        .await?;
+        if let Some(path) = asset_download_path.parent() {
+            fs::create_dir_all(path).await.context(IoSnafu { path })?;
+        }
         let okto_download = if asset_download_path.exists() {
             if let Err(x) = validate_sha1(
                 asset_download_path,
                 asset_download_hash
                     .get(index)
-                    .context("Can't get asset download hash")?,
+                    .context(ManifestLookUpSnafu {
+                        key: "asset_download_hash[index]",
+                    })?,
             )
             .await
             {
@@ -133,7 +138,9 @@ pub async fn parallel_assets_download(
             total_size.fetch_add(
                 *asset_download_size
                     .get(index)
-                    .context("Can't get asset download size")?,
+                    .context(ManifestLookUpSnafu {
+                        key: "asset_download_size[index]",
+                    })?,
                 Ordering::Relaxed,
             );
         }
@@ -143,13 +150,17 @@ pub async fn parallel_assets_download(
                 let bytes = download_file(
                     asset_download_list
                         .get(index)
-                        .context("Can't get asset download list")?,
+                        .context(ManifestLookUpSnafu {
+                            key: "asset_download_list[index]",
+                        })?,
                     current_size,
                 )
                 .await?;
-                fs::write(asset_download_path, bytes)
+                fs::write(&asset_download_path, bytes)
                     .await
-                    .map_err(|err| anyhow!(err))?;
+                    .context(IoSnafu {
+                        path: asset_download_path,
+                    })?;
             }
             Ok(())
         }));

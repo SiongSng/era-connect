@@ -1,18 +1,22 @@
+use std::fmt::Display;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::Path;
 pub use std::path::PathBuf;
 use std::{borrow::Cow, fs::create_dir_all};
 
 use chrono::{DateTime, Duration, Utc};
-use dioxus::signals::Writable;
 use dioxus::signals::{MappedSignal, Readable, Write};
 use dioxus_logger::tracing::info;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
+use snafu::prelude::*;
 
+use crate::api::backend_exclusive::mod_management::mods::ModError;
+use crate::api::backend_exclusive::storage::storage_loader::StorageError;
 pub use crate::api::backend_exclusive::storage::storage_loader::StorageLoader;
 
+use crate::api::backend_exclusive::vanilla::launcher::LaunchGameError;
 use crate::api::{
     backend_exclusive::{
         download::{execute_and_progress, DownloadBias, DownloadType},
@@ -26,6 +30,28 @@ use crate::api::{
     },
     shared_resources::entry::DATA_DIR,
 };
+
+#[derive(Debug, Snafu)]
+pub enum CollectionError {
+    // #[snafu(display("Failed to deserializae"))]
+    // Desearialization { source: serde_json::Error },
+    #[snafu(display("Could not read file at: {path:?}"))]
+    Io {
+        source: std::io::Error,
+        path: PathBuf,
+    },
+
+    #[snafu(transparent)]
+    ModError { source: ModError },
+    #[snafu(display("Project {id} cannot be found on Modrinth"))]
+    ModrinthNotAProject { id: String, source: ferinth::Error },
+    #[snafu(display("Project {id} cannot be found on Curseforge"))]
+    CurseForgeNotAPorject { id: String, source: furse::Error },
+    #[snafu(transparent)]
+    StorageError { source: StorageError },
+    #[snafu(transparent)]
+    LaunchGameError { source: LaunchGameError },
+}
 
 use super::entry::STORAGE;
 
@@ -77,7 +103,10 @@ impl CollectionId {
             .map(move |x| x.get(&self).unwrap())
     }
 
-    pub fn with_mut_collection(&self, f: impl FnOnce(CollectionViewMut)) -> anyhow::Result<()> {
+    pub fn with_mut_collection(
+        &self,
+        f: impl FnOnce(CollectionViewMut),
+    ) -> Result<(), CollectionError> {
         STORAGE
             .collections
             .with_mut(|x| x.get_mut(self).unwrap().with_mut(f))
@@ -136,7 +165,7 @@ impl Collection {
         self.entry_path.as_path()
     }
 
-    pub fn with_mut(&mut self, f: impl FnOnce(CollectionViewMut)) -> anyhow::Result<()> {
+    pub fn with_mut(&mut self, f: impl FnOnce(CollectionViewMut)) -> Result<(), CollectionError> {
         f(CollectionViewMut {
             display_name: &mut self.display_name,
             minecraft_version: &mut self.minecraft_version,
@@ -153,6 +182,7 @@ impl Collection {
             Cow::Borrowed(&self.entry_path),
         )
         .save(&self)
+        .map_err(Into::into)
     }
     /// Creates a collection and return a collection with its loader attached
     pub async fn create(
@@ -161,7 +191,7 @@ impl Collection {
         mod_loader: impl Into<Option<ModLoader>>,
         picture_path: impl Into<PathBuf>,
         advanced_options: Option<AdvancedOptions>,
-    ) -> anyhow::Result<Collection> {
+    ) -> Result<Collection, CollectionError> {
         let now_time = Utc::now();
         let loader = Self::create_loader(&display_name)?;
         let entry_path = loader.base_path.clone();
@@ -199,9 +229,15 @@ impl Collection {
         project_id: impl AsRef<str> + Send + Sync,
         tag: Vec<Tag>,
         mod_override: Option<Vec<ModOverride>>,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), CollectionError> {
         let project_id = project_id.as_ref();
-        let project = (&FERINTH).get_project(project_id).await?;
+        let project =
+            (&FERINTH)
+                .get_project(project_id)
+                .await
+                .context(ModrinthNotAProjectSnafu {
+                    id: project_id.to_string(),
+                })?;
         if let Some(manager) = self.mod_manager_mut() {
             manager
                 .add_project(project.into(), tag, mod_override.unwrap_or(Vec::new()))
@@ -216,8 +252,13 @@ impl Collection {
         project_ids: Vec<&str>,
         tag: Vec<Tag>,
         mod_override: impl Into<Option<Vec<ModOverride>>>,
-    ) -> anyhow::Result<()> {
-        let project = (&FERINTH).get_multiple_projects(&project_ids).await?;
+    ) -> Result<(), CollectionError> {
+        let project = (&FERINTH)
+            .get_multiple_projects(&project_ids)
+            .await
+            .context(ModrinthNotAProjectSnafu {
+                id: project_ids.join(" "),
+            })?;
         if let Some(mod_controller) = self.mod_controller.as_mut() {
             mod_controller
                 .manager
@@ -236,8 +277,13 @@ impl Collection {
         project_id: i32,
         tag: Vec<Tag>,
         mod_override: Option<Vec<ModOverride>>,
-    ) -> anyhow::Result<()> {
-        let project = (&FURSE).get_mod(project_id).await?;
+    ) -> Result<(), CollectionError> {
+        let project = (&FURSE)
+            .get_mod(project_id)
+            .await
+            .context(CurseForgeNotAPorjectSnafu {
+                id: project_id.to_string(),
+            })?;
         if let Some(mod_manager) = self.mod_manager_mut() {
             mod_manager
                 .add_project(project.into(), tag, mod_override.unwrap_or(Vec::new()))
@@ -247,7 +293,7 @@ impl Collection {
         Ok(())
     }
 
-    pub async fn download_mods(&self) -> anyhow::Result<()> {
+    pub async fn download_mods(&self) -> Result<(), CollectionError> {
         let id = self.get_collection_id();
         if let Some(mod_manager) = self.mod_manager() {
             let download_args = mod_manager.get_download().await?;
@@ -257,30 +303,34 @@ impl Collection {
                 DownloadBias::default(),
                 DownloadType::mods_download(),
             )
-            .await?;
+            .await;
         }
         Ok(())
     }
 
     /// SIDE-EFFECT: put `launch_args` into Struct
-    pub async fn launch_game(&mut self) -> anyhow::Result<()> {
+    pub async fn launch_game(&mut self) -> Result<(), CollectionError> {
         if self.launch_args.is_none() {
             self.launch_args = Some(self.verify_and_download_game().await?);
             self.save()?;
         }
-        vanilla::launcher::launch_game(&self.launch_args.as_ref().unwrap()).await
+        vanilla::launcher::launch_game(&self.launch_args.as_ref().unwrap())
+            .await
+            .map_err(Into::into)
     }
 
-    pub async unsafe fn launch_game_unchecked(&self) -> anyhow::Result<()> {
-        vanilla::launcher::launch_game(&self.launch_args.as_ref().unwrap_unchecked()).await
+    pub async unsafe fn launch_game_unchecked(&self) -> Result<(), CollectionError> {
+        vanilla::launcher::launch_game(&self.launch_args.as_ref().unwrap_unchecked())
+            .await
+            .map_err(Into::into)
     }
 
     /// Downloads game(also verifies)
-    pub async fn verify_and_download_game(&self) -> anyhow::Result<LaunchArgs> {
+    pub async fn verify_and_download_game(&self) -> Result<LaunchArgs, CollectionError> {
         if self.mod_loader().is_some() {
-            fetch_launch_args_modded(self).await
+            fetch_launch_args_modded(self).await.map_err(Into::into)
         } else {
-            full_vanilla_download(self).await
+            full_vanilla_download(self).await.map_err(Into::into)
         }
     }
 
@@ -299,7 +349,7 @@ impl Collection {
         CollectionId(hasher.finish())
     }
 
-    fn save(&self) -> anyhow::Result<()> {
+    fn save(&self) -> Result<(), CollectionError> {
         StorageLoader::new(
             COLLECTION_FILE_NAME.to_string(),
             Cow::Borrowed(&self.entry_path),
@@ -307,7 +357,7 @@ impl Collection {
         .save(&self)?;
         STORAGE
             .collections
-            .try_write_unchecked()?
+            .write()
             .entry(self.get_collection_id())
             .and_modify(|x| {
                 if x != self {
@@ -331,7 +381,7 @@ impl Collection {
         self.mod_controller.as_mut().map(|x| &mut x.manager)
     }
 
-    fn create_loader(display_name: &str) -> std::io::Result<StorageLoader> {
+    fn create_loader(display_name: &str) -> Result<StorageLoader, StorageError> {
         // Windows file and directory name restrictions.
         let invalid_chars_regex = Regex::new(r#"[\\/:*?\"<>|]"#).unwrap();
         let reserved_names = vec![
@@ -350,7 +400,10 @@ impl Collection {
         }
 
         let entry_path = Self::handle_duplicate_dir(Collection::get_base_path(), &dir_name);
-        create_dir_all(&entry_path)?;
+        create_dir_all(&entry_path).map_err(|x| StorageError::Io {
+            source: x,
+            path: entry_path.clone(),
+        })?;
         let loader =
             StorageLoader::new(COLLECTION_FILE_NAME.to_string(), Cow::Borrowed(&entry_path));
 
@@ -378,16 +431,32 @@ impl Collection {
             .collect()
     }
 
-    pub fn scan() -> anyhow::Result<Vec<Collection>> {
+    pub fn scan() -> Result<Vec<Collection>, CollectionError> {
         let mut collections = Vec::new();
         let collection_base_dir = Self::get_base_path();
-        create_dir_all(&collection_base_dir)?;
-        let dirs = collection_base_dir.read_dir()?;
+        create_dir_all(&collection_base_dir).context(IoSnafu {
+            path: &collection_base_dir,
+        })?;
+        let dirs = collection_base_dir.read_dir().context(IoSnafu {
+            path: &collection_base_dir,
+        })?;
 
         for base_entry in dirs {
-            let base_entry_path = base_entry?.path();
-            for file in base_entry_path.read_dir()? {
-                let file_name = file?.file_name().to_string_lossy().to_string();
+            let base_entry_path = base_entry
+                .context(IoSnafu {
+                    path: PathBuf::new(),
+                })?
+                .path();
+            for file in base_entry_path.read_dir().context(IoSnafu {
+                path: &base_entry_path,
+            })? {
+                let file_name = file
+                    .context(IoSnafu {
+                        path: PathBuf::new(),
+                    })?
+                    .file_name()
+                    .to_string_lossy()
+                    .to_string();
 
                 if file_name == COLLECTION_FILE_NAME {
                     let path = collection_base_dir.join(&base_entry_path);
@@ -424,18 +493,13 @@ impl ModLoader {
     }
 }
 
-impl ToString for ModLoader {
-    fn to_string(&self) -> String {
-        match self.mod_loader_type {
-            ModLoaderType::Forge => String::from("Forge"),
-            ModLoaderType::NeoForge => String::from("Neoforge"),
-            ModLoaderType::Fabric => String::from("Fabric"),
-            ModLoaderType::Quilt => String::from("Quilt"),
-        }
+impl Display for ModLoader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.mod_loader_type)
     }
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, derive_more::Display)]
 pub enum ModLoaderType {
     Forge,
     NeoForge,

@@ -1,8 +1,8 @@
-use anyhow::Ok;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::api::backend_exclusive::download::download_file;
+use crate::api::backend_exclusive::errors::ManifestProcessingError;
 
 use super::assets::AssetIndex;
 use super::library::Library;
@@ -71,10 +71,12 @@ pub struct JavaVersion {
     pub component: String,
     pub major_version: u32,
 }
+use crate::api::backend_exclusive::errors::*;
+use snafu::prelude::*;
 
-pub async fn fetch_game_manifest(url: &str) -> anyhow::Result<GameManifest> {
+pub async fn fetch_game_manifest(url: &str) -> Result<GameManifest, ManifestProcessingError> {
     let response = download_file(url, None).await?;
-    let p = serde_json::from_slice(&response)?;
+    let manifest = serde_json::from_slice(&response).context(DesearializationSnafu)?;
 
-    Ok(p)
+    Ok(manifest)
 }

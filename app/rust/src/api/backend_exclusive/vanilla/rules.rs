@@ -1,4 +1,3 @@
-use anyhow::{anyhow, Context, Result};
 use core::fmt;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -56,19 +55,22 @@ pub struct Rule {
     pub os: Option<Os>,
 }
 
-pub fn get_rules(argument: &[Value]) -> Result<Vec<Rule>> {
-    let rules: anyhow::Result<Vec<Rule>> = argument
+use errors::*;
+
+use crate::api::backend_exclusive::errors;
+use snafu::prelude::*;
+
+pub fn get_rules(argument: &[Value]) -> Result<Vec<Rule>, ManifestProcessingError> {
+    argument
         .iter()
         .filter(|x| x["rules"][0].is_object())
         .map(|x| {
             Rule::deserialize(
                 x.get("rules")
-                    .context("rules doen't exists")?
-                    .get(0)
-                    .context("somehow rules exist but its empty")?,
+                    .and_then(|x| x.get(0))
+                    .context(ManifestLookUpSnafu { key: "Rule[rules]" })?,
             )
-            .map_err(|x| anyhow!(x))
+            .context(DesearializationSnafu)
         })
-        .collect();
-    rules.context("Failed to collect/serialize rules")
+        .collect()
 }

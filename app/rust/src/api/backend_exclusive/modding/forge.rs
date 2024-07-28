@@ -9,17 +9,18 @@ use std::{
     },
 };
 
-use anyhow::{Context, Result};
 use dioxus_logger::tracing::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use snafu::prelude::*;
 use tokio::io::AsyncBufReadExt;
 
 use crate::api::backend_exclusive::{
     download::{execute_and_progress, DownloadArgs, DownloadBias, DownloadType, HandlesType},
+    errors::*,
     modding::library::prepare_modloader_download,
     vanilla::{
-        launcher::{prepare_vanilla_download, JvmOptions, LaunchArgs},
+        launcher::{prepare_vanilla_download, JvmOptions, LaunchArgs, LaunchGameError},
         manifest::fetch_game_manifest,
     },
 };
@@ -68,9 +69,17 @@ struct ProcessorsDataType {
 }
 
 impl ProcessorsDataType {
-    fn convert_maven_to_path(&mut self, folder: &str) -> Result<()> {
-        self.client = convert_maven_to_path(&self.client, Some(folder))?;
-        self.server = convert_maven_to_path(&self.server, Some(folder))?;
+    fn convert_maven_to_path(&mut self, folder: &str) -> Result<(), ManifestProcessingError> {
+        self.client = convert_maven_to_path(&self.client, Some(folder)).context(
+            MavenPathTranslationSnafu {
+                str: self.client.clone(),
+            },
+        )?;
+        self.server = convert_maven_to_path(&self.server, Some(folder)).context(
+            MavenPathTranslationSnafu {
+                str: self.server.clone(),
+            },
+        )?;
         Ok(())
     }
 }
@@ -79,21 +88,25 @@ pub fn processers_process(
     mut launch_args: LaunchArgs,
     jvm_options: JvmOptions,
     manifest: Value,
-) -> Result<(LaunchArgs, DownloadArgs)> {
+) -> Result<(LaunchArgs, DownloadArgs), ManifestProcessingError> {
     let libraries_folder = jvm_options.library_directory.to_string_lossy().to_string();
-    let library_manifest = Vec::<ModloaderLibrary>::deserialize(
-        manifest
-            .get("libraries")
-            .context("mod loader manifest library doesn't exist")?,
-    )?;
+    let library_manifest = manifest
+        .get("libraries")
+        .map(|x| Vec::<ModloaderLibrary>::deserialize(x))
+        .context(ManifestLookUpSnafu {
+            key: String::from("manifest[libraries]"),
+        })?
+        .context(DesearializationSnafu)?;
     let processor_data = manifest
         .get("data")
         .map(|x| ProcessorData::deserialize(x))
-        .map_or(Ok(None), |v| v.map(Some))?;
+        .transpose()
+        .context(DesearializationSnafu)?;
     let processors = manifest
         .get("processors")
         .map(|x| Vec::<Processors>::deserialize(x))
-        .map_or(Ok(None), |v| v.map(Some))?;
+        .transpose()
+        .context(DesearializationSnafu)?;
 
     let forge_installer = library_manifest
         .iter()
@@ -146,18 +159,18 @@ pub fn processers_process(
         handles.push(Box::pin(async move {
             for (i, processor) in processors.into_iter().enumerate() {
                 index_cloned.store(i, Ordering::Relaxed);
-                let processor_jar = convert_maven_to_path(&processor.jar, Some(&libraries_folder))?;
+                let processor_jar = convert_maven_to_path(&processor.jar, Some(&libraries_folder))
+                    .context(MavenPathTranslationSnafu {
+                        str: processor.jar.clone(),
+                    })?;
                 let processor_main_class = get_processor_main_class(processor_jar.clone())
                     .await?
-                    .context("Processor main class doesn't exist")?;
+                    .context(MainClassSnafu)?;
                 let mut processor_classpath = processor
                     .classpath
                     .iter()
-                    .map(|x| {
-                        convert_maven_to_path(x, Some(&libraries_folder))
-                            .context("failed to convert processor classpath maven to path")
-                    })
-                    .collect::<Result<Vec<_>>>()?;
+                    .flat_map(|x| convert_maven_to_path(x, Some(&libraries_folder)))
+                    .collect::<Vec<_>>();
 
                 processor_classpath.push(processor_jar);
 
@@ -172,18 +185,22 @@ pub fn processers_process(
                     &processor_data,
                     &minecraft_jar,
                     &game_directory,
-                    &convert_maven_to_path(&forge_installer, Some(&libraries_folder))?,
+                    &convert_maven_to_path(&forge_installer, Some(&libraries_folder)).context(
+                        MavenPathTranslationSnafu {
+                            str: forge_installer.to_string(),
+                        },
+                    )?,
                 )
                 .into_iter()
                 .map(|x| {
                     if x.starts_with('[') {
                         convert_maven_to_path(&x, Some(&libraries_folder))
-                            .context("failed to convert [] types maven into path")
+                            .context(MavenPathTranslationSnafu { str: x })
                     } else {
                         Ok(x)
                     }
                 })
-                .collect::<Result<Vec<_>>>()?;
+                .collect::<Result<Vec<_>, _>>()?;
 
                 let mut all = Vec::new();
                 all.push(String::from("-cp"));
@@ -195,36 +212,42 @@ pub fn processers_process(
                     .args(all)
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
-                    .spawn()?
-                    .stdout
-                    .context("stdout doesn't exist")?;
-                let read = tokio::io::BufReader::new(process);
-                let mut a = read.lines();
-                while let Some(x) = a.next_line().await? {
-                    debug!("{x}");
+                    .spawn()
+                    .context(TokioSpawnTaskSnafu)?
+                    .stdout;
+                if let Some(process) = process {
+                    let read = tokio::io::BufReader::new(process);
+                    let mut a = read.lines();
+                    while let Some(x) = a.next_line().await.context(IoSnafu {
+                        path: String::new(),
+                    })? {
+                        debug!("{x}");
+                    }
                 }
             }
             Ok(())
         }));
     }
 
-    let arguments = manifest
-        .get("arguments")
-        .context("modloader arguments doesn't exist")?;
+    let arguments = manifest.get("arguments").context(ManifestLookUpSnafu {
+        key: "manifest[arguments]",
+    })?;
     let jvm = arguments
         .get("jvm")
         .map(|x| Vec::<String>::deserialize(x))
-        .unwrap_or(Ok(vec![]))?;
+        .unwrap_or(Ok(vec![]))
+        .context(DesearializationSnafu)?;
     let game = arguments
         .get("game")
         .map(|x| Vec::<String>::deserialize(x))
-        .unwrap_or(Ok(vec![]))?;
+        .unwrap_or(Ok(vec![]))
+        .context(DesearializationSnafu)?;
     let jvm = jvm_args_parse(&jvm, &jvm_options);
     launch_args.main_class = manifest
         .get("mainClass")
-        .context("failed to get mainClass of Forge")?
+        .context(MainClassSnafu)?
         .as_str()
-        .context("forge mainClass doesn't existing")?
+        .context(MainClassSnafu)?
         .to_owned();
     launch_args.jvm_args.extend(jvm);
     launch_args.game_args.extend(game);
@@ -350,12 +373,9 @@ fn process_client(
     parsed_argument
 }
 
-fn pre_convert_maven_to_path(input: &str, extension: Option<&str>) -> Result<String> {
+fn pre_convert_maven_to_path(input: &str, extension: Option<&str>) -> Option<String> {
     let parts: Vec<&str> = input.split(':').collect();
-    let org = parts
-        .first()
-        .context("failed to got org from maven")?
-        .replace('.', "/");
+    let org = parts.first()?.replace('.', "/");
     let package = parts[1];
     let path_version = parts[2];
     let mut version = parts[2].to_owned();
@@ -369,10 +389,10 @@ fn pre_convert_maven_to_path(input: &str, extension: Option<&str>) -> Result<Str
     let file_name = format!("{package}-{version}.{extension}");
     let path = format!("{org}/{package}/{path_version}");
 
-    Ok(format!("{path}/{file_name}"))
+    Some(format!("{path}/{file_name}"))
 }
 
-pub fn convert_maven_to_path(str: &str, folder: Option<&str>) -> Result<String> {
+pub fn convert_maven_to_path(str: &str, folder: Option<&str>) -> Option<String> {
     let pos = str.find(|x| x == '@');
     let mut pre_maven = pos.map_or_else(
         || pre_convert_maven_to_path(str, None),
@@ -382,13 +402,15 @@ pub fn convert_maven_to_path(str: &str, folder: Option<&str>) -> Result<String> 
     if let Some(folder) = folder {
         pre_maven.insert_str(0, format!("{folder}/").as_str());
     }
-    Ok(pre_maven)
+    Some(pre_maven)
 }
 
-pub async fn get_processor_main_class(path: String) -> Result<Option<String>> {
+pub async fn get_processor_main_class(
+    path: String,
+) -> Result<Option<String>, ManifestProcessingError> {
     let zipfile = tokio::fs::File::open(&path)
         .await
-        .context(path)?
+        .context(IoSnafu { path })?
         .into_std()
         .await;
     let mut archive = zip::ZipArchive::new(zipfile)?;
@@ -398,7 +420,9 @@ pub async fn get_processor_main_class(path: String) -> Result<Option<String>> {
     let reader = BufReader::new(file);
 
     for line in reader.lines() {
-        let mut line = line?;
+        let mut line = line.context(IoSnafu {
+            path: String::new(),
+        })?;
         line.retain(|c| !c.is_whitespace());
 
         if line.starts_with("Main-Class:") {
@@ -409,7 +433,10 @@ pub async fn get_processor_main_class(path: String) -> Result<Option<String>> {
     }
     Ok(None)
 }
-pub async fn fetch_launch_args_modded(collection: &Collection) -> anyhow::Result<LaunchArgs> {
+
+pub async fn fetch_launch_args_modded(
+    collection: &Collection,
+) -> Result<LaunchArgs, LaunchGameError> {
     let collection_id = collection.get_collection_id();
     info!("Starts Vanilla Downloading");
     let vanilla_bias = DownloadBias {
@@ -429,7 +456,7 @@ pub async fn fetch_launch_args_modded(collection: &Collection) -> anyhow::Result
         vanilla_bias,
         DownloadType::vanilla(),
     )
-    .await?;
+    .await;
 
     info!("Starts Modloader Downloading");
     let modloader_download_bias = DownloadBias {
@@ -449,7 +476,7 @@ pub async fn fetch_launch_args_modded(collection: &Collection) -> anyhow::Result
         modloader_download_bias,
         DownloadType::mod_loader_assets(),
     )
-    .await?;
+    .await;
 
     info!("Starts Modloader Processing");
     let forge_processor_bias = DownloadBias {
@@ -468,6 +495,6 @@ pub async fn fetch_launch_args_modded(collection: &Collection) -> anyhow::Result
         forge_processor_bias,
         DownloadType::mod_loader_proccess(),
     )
-    .await?;
+    .await;
     Ok(processed_arguments)
 }

@@ -1,13 +1,13 @@
 use std::ops::Add;
 
-use anyhow::Context;
 use chrono::{Duration, Utc};
 use oauth2::basic::{BasicClient, BasicErrorResponseType, BasicTokenType};
-use oauth2::reqwest::async_http_client;
+use oauth2::reqwest::{async_http_client, AsyncHttpClientError};
 use oauth2::{
-    AuthUrl, ClientId, DeviceAuthorizationUrl, EmptyExtraTokenFields, RevocationErrorResponseType,
-    Scope, StandardDeviceAuthorizationResponse, StandardErrorResponse, StandardRevocableToken,
-    StandardTokenIntrospectionResponse, StandardTokenResponse, TokenResponse, TokenUrl,
+    AuthUrl, ClientId, DeviceAuthorizationUrl, DeviceCodeErrorResponse, EmptyExtraTokenFields,
+    RevocationErrorResponseType, Scope, StandardDeviceAuthorizationResponse, StandardErrorResponse,
+    StandardRevocableToken, StandardTokenIntrospectionResponse, StandardTokenResponse,
+    TokenResponse, TokenUrl,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -44,18 +44,68 @@ pub enum LoginFlowStage {
     GettingProfile,
 }
 
-#[derive(Debug, thiserror::Error)]
+use snafu::prelude::*;
+
+#[derive(Snafu, Debug)]
 pub enum LoginFlowError {
-    #[error("token Xsts issues")]
-    XstsError(#[from] XstsTokenErrorType),
-    #[error("unknown data store error")]
-    UnknownError(String),
-    #[error("you don't own the game")]
+    #[snafu(display("Token Xsts issues"))]
+    XstsError { source: XstsTokenErrorType },
+    #[snafu(display("You don't own the game"))]
     GameNotOwned,
-    #[error("having issues sending through the channel")]
-    Senderror(#[from] tokio::sync::mpsc::error::SendError<LoginFlowEvent>),
-    #[error(transparent)]
-    Other(#[from] anyhow::Error),
+
+    #[snafu(display("Internet Error, could not download {url}"))]
+    Internet { source: reqwest::Error, url: String },
+    #[snafu(display("Could not read file at: {path}"))]
+    Io {
+        source: std::io::Error,
+        path: String,
+    },
+    #[snafu(display("Url parse error, {url}"))]
+    Parse { url: String },
+
+    #[snafu(display("Refresh Token not found"))]
+    RefreshToken,
+
+    #[snafu(transparent)]
+    OauthError { source: OauthErrors },
+
+    #[snafu(transparent)]
+    SendError {
+        source: tokio::sync::mpsc::error::SendError<LoginFlowEvent>,
+    },
+
+    #[snafu(display("Missing xbox live user hash"))]
+    MissingXboxLiveUserHash,
+    #[snafu(display("Failed to send data to: {url} with payload: {payload}"))]
+    UrlResponse {
+        url: String,
+        payload: String,
+        source: reqwest::Error,
+    },
+    #[snafu(display("Failed to deserialize response of xbox live"))]
+    ResponseDeserializaiton { source: reqwest::Error },
+}
+
+#[derive(Snafu, Debug)]
+pub enum OauthErrors {
+    #[snafu(context(false), display("Failed to do oath request on device code"))]
+    RequestDeviceCode {
+        source: oauth2::RequestTokenError<AsyncHttpClientError, DeviceCodeErrorResponse>,
+    },
+    #[snafu(context(false), display("Failed to do oath request on standard error"))]
+    RequestStandardResponse {
+        source: oauth2::RequestTokenError<
+            AsyncHttpClientError,
+            StandardErrorResponse<BasicErrorResponseType>,
+        >,
+    },
+    #[snafu(context(false), display("Configuration error for oauth"))]
+    Configuration { source: oauth2::ConfigurationError },
+    #[snafu(display("Failed to parse {url}"))]
+    Url {
+        url: String,
+        source: oauth2::url::ParseError,
+    },
 }
 
 type OAuthClient = oauth2::Client<
@@ -161,8 +211,8 @@ pub async fn login_flow(
 
             token
         }
-        XstsResponse::Error(e) => {
-            return Err(e.xerr.into());
+        XstsResponse::Error(err) => {
+            return Err(LoginFlowError::XstsError { source: err.xerr });
         }
     };
 
@@ -190,22 +240,32 @@ pub async fn login_flow(
     Ok(account)
 }
 
-fn create_oauth_client() -> anyhow::Result<OAuthClient> {
+fn create_oauth_client() -> Result<OAuthClient, OauthErrors> {
+    let auth_url = AuthUrl::new(MSA_URL.to_owned()).context(UrlSnafu {
+        url: MSA_URL.to_string(),
+    })?;
+    let token_url = TokenUrl::new(MSA_TOKEN_URL.to_owned()).context(UrlSnafu {
+        url: MSA_TOKEN_URL.to_owned(),
+    })?;
+    let device_authorization_url = DeviceAuthorizationUrl::new(MSA_DEVICE_CODE_URL.to_owned())
+        .context(UrlSnafu {
+            url: MSA_DEVICE_CODE_URL.to_owned(),
+        })?;
     let client = BasicClient::new(
         ClientId::new(MSA_CLIENT_ID.to_owned()),
         None,
-        AuthUrl::new(MSA_URL.to_owned())?,
-        Some(TokenUrl::new(MSA_TOKEN_URL.to_owned())?),
+        auth_url,
+        Some(token_url),
     )
-    .set_device_authorization_url(DeviceAuthorizationUrl::new(MSA_DEVICE_CODE_URL.to_owned())?);
+    .set_device_authorization_url(device_authorization_url);
 
     Ok(client)
 }
 
 async fn fetch_device_code(
     client: &OAuthClient,
-) -> anyhow::Result<StandardDeviceAuthorizationResponse> {
-    let response: StandardDeviceAuthorizationResponse = client
+) -> Result<StandardDeviceAuthorizationResponse, OauthErrors> {
+    let response = client
         .exchange_device_code()?
         .add_scope(Scope::new(MSA_SCOPE.to_owned()))
         .request_async(async_http_client)
@@ -217,23 +277,24 @@ async fn fetch_device_code(
 async fn fetch_microsoft_token(
     client: &OAuthClient,
     auth_response: &StandardDeviceAuthorizationResponse,
-) -> anyhow::Result<(String, String)> {
+) -> Result<(String, String), LoginFlowError> {
     let response: StandardTokenResponse<EmptyExtraTokenFields, BasicTokenType> = client
         .exchange_device_access_token(auth_response)
         .request_async(async_http_client, sleep, None)
-        .await?;
+        .await
+        .map_err(Into::<OauthErrors>::into)?;
 
     Ok((
         response.access_token().secret().clone(),
         response
             .refresh_token()
-            .context("refresh token not found")?
+            .context(RefreshTokenSnafu)?
             .secret()
             .clone(),
     ))
 }
 
-async fn authenticate_xbox_live(ms_access_token: &str) -> anyhow::Result<(String, String)> {
+async fn authenticate_xbox_live(ms_access_token: &str) -> Result<(String, String), LoginFlowError> {
     let client = reqwest::Client::new();
 
     let payload = json!({
@@ -252,22 +313,29 @@ async fn authenticate_xbox_live(ms_access_token: &str) -> anyhow::Result<(String
         .header("Content-Type", "application/json")
         .header("Accept", "application/json")
         .send()
-        .await?;
-    let response = response.json::<XboxLiveResponse>().await?;
+        .await
+        .context(UrlResponseSnafu {
+            url: XBOX_LIVE_AUTH_URL,
+            payload: payload.to_string(),
+        })?;
+    let response = response
+        .json::<XboxLiveResponse>()
+        .await
+        .context(ResponseDeserializaitonSnafu)?;
 
     let xbl_token = response.token;
     let user_hash = response
         .display_claims
         .xui
         .first()
-        .context("Xbox Live user hash not found")?
+        .context(MissingXboxLiveUserHashSnafu)?
         .uhs
         .clone();
 
     Ok((xbl_token, user_hash))
 }
 
-async fn fetch_xsts_token(xbl_token: &str) -> anyhow::Result<XstsResponse> {
+async fn fetch_xsts_token(xbl_token: &str) -> Result<XstsResponse, LoginFlowError> {
     let client = reqwest::Client::new();
 
     let payload = json!({
@@ -285,20 +353,33 @@ async fn fetch_xsts_token(xbl_token: &str) -> anyhow::Result<XstsResponse> {
         .header("Content-Type", "application/json")
         .header("Accept", "application/json")
         .send()
-        .await?;
+        .await
+        .context(UrlResponseSnafu {
+            url: XBOX_LIVE_XSTS_URL,
+            payload: payload.to_string(),
+        })?;
 
     if response.status() == 401 {
-        let response = response.json::<XstsTokenError>().await?;
+        let response = response
+            .json::<XstsTokenError>()
+            .await
+            .context(ResponseDeserializaitonSnafu)?;
         return Ok(XstsResponse::Error(response));
     }
 
-    let response = response.json::<XboxLiveResponse>().await?;
+    let response = response
+        .json::<XboxLiveResponse>()
+        .await
+        .context(ResponseDeserializaitonSnafu)?;
     let xsts_token = response.token;
 
     Ok(XstsResponse::Success(xsts_token))
 }
 
-async fn fetch_minecraft_token(xsts_token: &str, user_hash: &str) -> anyhow::Result<(String, i64)> {
+async fn fetch_minecraft_token(
+    xsts_token: &str,
+    user_hash: &str,
+) -> Result<(String, i64), LoginFlowError> {
     let client = reqwest::Client::new();
 
     let payload = json!({
@@ -309,21 +390,35 @@ async fn fetch_minecraft_token(xsts_token: &str, user_hash: &str) -> anyhow::Res
         .post(MINECRAFT_AUTH_URL)
         .json(&payload)
         .send()
-        .await?;
-    let response = response.json::<MinecraftTokenResponse>().await?;
+        .await
+        .context(UrlResponseSnafu {
+            url: MINECRAFT_AUTH_URL,
+            payload: payload.to_string(),
+        })?;
+    let response = response
+        .json::<MinecraftTokenResponse>()
+        .await
+        .context(ResponseDeserializaitonSnafu)?;
 
     Ok((response.access_token, response.expires_in))
 }
 
-async fn get_user_profile(mc_access_token: &str) -> anyhow::Result<MinecraftUserProfile> {
+async fn get_user_profile(mc_access_token: &str) -> Result<MinecraftUserProfile, LoginFlowError> {
     let client = reqwest::Client::new();
 
     let response = client
         .get(MINECRAFT_USER_PROFILE_URL)
         .bearer_auth(mc_access_token)
         .send()
-        .await?;
-    let response = response.json::<MinecraftUserProfile>().await?;
+        .await
+        .context(UrlResponseSnafu {
+            url: MINECRAFT_USER_PROFILE_URL,
+            payload: mc_access_token.to_string(),
+        })?;
+    let response = response
+        .json::<MinecraftUserProfile>()
+        .await
+        .context(ResponseDeserializaitonSnafu)?;
 
     Ok(response)
 }

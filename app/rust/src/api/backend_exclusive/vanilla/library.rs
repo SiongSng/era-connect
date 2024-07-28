@@ -6,12 +6,14 @@ use std::{
     },
 };
 
-use anyhow::{bail, Context, Result};
 use dioxus_logger::tracing::error;
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 
-use crate::api::backend_exclusive::download::{download_file, validate_sha1, HandlesType};
+use crate::api::backend_exclusive::{
+    download::{download_file, validate_sha1, DownloadError, HandlesType},
+    errors::{self, ManifestProcessingError},
+};
 
 use super::rules::{ActionType, OsName, Rule};
 
@@ -58,6 +60,26 @@ pub fn os_match(library: &Library, current_os_type: OsName) -> (bool, bool, &str
     }
     (process_native, is_native_library, library_extension_type)
 }
+
+use snafu::prelude::*;
+
+#[derive(Snafu, Debug)]
+pub enum LibraryError {
+    #[snafu(display("OS {os} not supported"))]
+    OsNotSupported { os: String },
+    #[snafu(display("{str}"))]
+    OsDetection { str: String },
+    #[snafu(transparent)]
+    Zip { source: zip::result::ZipError },
+    #[snafu(transparent)]
+    Download { source: DownloadError },
+    #[snafu(display("Could not read file at: {path:?}"))]
+    Io {
+        source: std::io::Error,
+        path: PathBuf,
+    },
+}
+
 pub async fn parallel_library(
     library_list: Arc<[Library]>,
     folder: Arc<Path>,
@@ -65,16 +87,20 @@ pub async fn parallel_library(
     current: Arc<AtomicUsize>,
     total_size: Arc<AtomicUsize>,
     library_download_handles: &mut HandlesType,
-) -> Result<()> {
+) -> Result<(), LibraryError> {
     let current_size = current;
 
-    let current_os = os_version::detect()?;
+    let current_os =
+        os_version::detect().map_err(|x| LibraryError::OsDetection { str: x.to_string() })?;
     let current_os_type = match current_os {
-        os_version::OsVersion::Linux(_) => OsName::Linux,
-        os_version::OsVersion::Windows(_) => OsName::Windows,
-        os_version::OsVersion::MacOS(_) => OsName::Osx,
-        _ => bail!("not supported"),
-    };
+        os_version::OsVersion::Linux(_) => Some(OsName::Linux),
+        os_version::OsVersion::Windows(_) => Some(OsName::Windows),
+        os_version::OsVersion::MacOS(_) => Some(OsName::Osx),
+        _ => None,
+    }
+    .context(OsNotSupportedSnafu {
+        os: current_os.to_string(),
+    })?;
 
     for index in 0..(library_list).len() {
         let library_list = Arc::clone(&library_list);
@@ -104,13 +130,12 @@ pub async fn parallel_library(
             };
 
             if !process_native && non_native_redownload {
-                let parent_dir = non_native_download_path
-                    .parent()
-                    .context("Can't find parent of non_native_download_path")?;
-                fs::create_dir_all(parent_dir)
-                    .await
-                    .context("Fail to create parent dir(library)")?;
-                total_size.fetch_add(library.downloads.artifact.size, Ordering::Relaxed);
+                if let Some(parent_dir) = non_native_download_path.parent() {
+                    fs::create_dir_all(parent_dir)
+                        .await
+                        .context(IoSnafu { path: parent_dir })?;
+                    total_size.fetch_add(library.downloads.artifact.size, Ordering::Relaxed);
+                }
             }
             if process_native {
                 total_size.fetch_add(library.downloads.artifact.size, Ordering::Relaxed);
@@ -122,7 +147,11 @@ pub async fn parallel_library(
             let handle = Box::pin(async move {
                 if !process_native && non_native_redownload {
                     let bytes = download_file(url.clone(), Arc::clone(&current_size)).await?;
-                    fs::write(&non_native_download_path, bytes).await?;
+                    fs::write(&non_native_download_path, bytes)
+                        .await
+                        .context(errors::IoSnafu {
+                            path: non_native_download_path,
+                        })?;
                 }
                 // always download(kinda required for now.)
                 if process_native {
@@ -132,9 +161,10 @@ pub async fn parallel_library(
                         native_folder,
                         &library_extension,
                     )
-                    .await?;
+                    .await
+                    .map_err(Into::<ManifestProcessingError>::into)?;
                 }
-                Ok::<_, anyhow::Error>(())
+                Ok(())
             });
             library_download_handles.push(handle);
         }
@@ -148,7 +178,7 @@ async fn native_download(
     current_size: Arc<AtomicUsize>,
     native_folder: Arc<Path>,
     library_extension: &str,
-) -> Result<()> {
+) -> Result<(), LibraryError> {
     let current_size_clone = Arc::clone(&current_size);
     let bytes = download_file(url, current_size_clone).await?;
 
@@ -158,16 +188,13 @@ async fn native_download(
         archive.extract(native_temp_dir.as_path())?;
         for x in archive.file_names() {
             if (x.contains(library_extension) || x.contains(".sha1")) && !x.contains(".git") {
-                tokio::fs::rename(
-                    native_temp_dir.join(x),
-                    native_folder.join(
-                        PathBuf::from(x)
-                            .file_name()
-                            .context("can't find file name of native archive")?,
-                    ),
-                )
-                .await
-                .context("Fail to move from native_temp_dir -> native_folder")?;
+                let to =
+                    native_folder.join(PathBuf::from(x).file_name().expect("Somhow no filename"));
+                tokio::fs::rename(native_temp_dir.join(x), to)
+                    .await
+                    .context(IoSnafu {
+                        path: &native_temp_dir,
+                    })?;
             }
         }
     }

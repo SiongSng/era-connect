@@ -1,4 +1,3 @@
-use anyhow::anyhow;
 use std::{
     collections::HashSet,
     sync::{
@@ -7,11 +6,11 @@ use std::{
     },
 };
 
-use anyhow::{Context, Result};
 use bytes::Bytes;
 use dioxus_logger::tracing::{debug, error};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use snafu::prelude::*;
 use tokio::fs;
 
 use crate::api::{
@@ -64,76 +63,110 @@ struct ForgeLoaders {
     stable: bool,
 }
 
-async fn fetch_neoforge_manifest(game_version: &str, forge_version: Option<&str>) -> Result<Bytes> {
+use crate::api::backend_exclusive::errors::*;
+
+async fn fetch_neoforge_manifest(
+    game_version: &str,
+    forge_version: Option<&str>,
+) -> Result<Bytes, ManifestProcessingError> {
     let bytes = download_file("https://meta.modrinth.com/neo/v0/manifest.json", None).await?;
-    let forge_manifest: ModloaderVersionsManifest = serde_json::from_slice(&bytes)?;
+    let forge_manifest: ModloaderVersionsManifest =
+        serde_json::from_slice(&bytes).context(DesearializationSnafu)?;
     let loaders = &forge_manifest
         .game_versions
         .iter()
         .find(|x| x.id == game_version)
-        .context("Can't find the desired game version")?
+        .context(GameVersionNotExistSnafu {
+            desired: game_version,
+        })?
         .loaders;
     let loader_url = &match forge_version {
         Some(x) => loaders.iter().find(|y| y.id == x),
         None => loaders.first(),
     }
-    .context("Can't find the forge manifest")?
+    .context(NoManifestSnafu {
+        modloader_type: ModLoaderType::NeoForge,
+    })?
     .url;
-    download_file(&loader_url, None).await
+    download_file(&loader_url, None).await.map_err(Into::into)
 }
 
-async fn fetch_forge_manifest(game_version: &str, forge_version: Option<&str>) -> Result<Bytes> {
+async fn fetch_forge_manifest(
+    game_version: &str,
+    forge_version: Option<&str>,
+) -> Result<Bytes, ManifestProcessingError> {
     let bytes = download_file("https://meta.modrinth.com/forge/v0/manifest.json", None).await?;
-    let forge_manifest: ModloaderVersionsManifest = serde_json::from_slice(&bytes)?;
+    let forge_manifest: ModloaderVersionsManifest =
+        serde_json::from_slice(&bytes).context(DesearializationSnafu)?;
     let loaders = &forge_manifest
         .game_versions
         .iter()
         .find(|x| x.id == game_version)
-        .context("Can't find the desired game version")?
+        .context(GameVersionNotExistSnafu {
+            desired: game_version,
+        })?
         .loaders;
     let loader_url = &match forge_version {
         Some(x) => loaders.iter().find(|y| y.id == x),
         None => loaders.first(),
     }
-    .context("Can't find the forge manifest")?
+    .context(NoManifestSnafu {
+        modloader_type: ModLoaderType::Forge,
+    })?
     .url;
-    download_file(&loader_url, None).await
+    download_file(&loader_url, None).await.map_err(Into::into)
 }
 
-async fn fetch_quilt_manifest(quilt_version: Option<&str>) -> Result<Bytes> {
+async fn fetch_quilt_manifest(
+    game_version: &str,
+    quilt_version: Option<&str>,
+) -> Result<Bytes, ManifestProcessingError> {
     let bytes = download_file("https://meta.modrinth.com/quilt/v0/manifest.json", None).await?;
-    let version_manifest: ModloaderVersionsManifest = serde_json::from_slice(&bytes)?;
+    let version_manifest: ModloaderVersionsManifest =
+        serde_json::from_slice(&bytes).context(DesearializationSnafu)?;
     let loaders = &version_manifest
         .game_versions
         .iter()
-        .next()
-        .context("Can't find the desired game version")?
+        .find(|x| x.id == game_version)
+        .context(GameVersionNotExistSnafu {
+            desired: game_version,
+        })?
         .loaders;
     let loader_url = &match quilt_version {
         Some(x) => loaders.iter().find(|y| y.id == x),
         None => loaders.first(),
     }
-    .context("Can't find the forge manifest")?
+    .context(NoManifestSnafu {
+        modloader_type: ModLoaderType::Quilt,
+    })?
     .url;
-    download_file(&loader_url, None).await
+    download_file(&loader_url, None).await.map_err(Into::into)
 }
 
-async fn fetch_fabric_manifest(fabric_version: Option<&str>) -> Result<Bytes> {
+async fn fetch_fabric_manifest(
+    game_version: &str,
+    fabric_version: Option<&str>,
+) -> Result<Bytes, ManifestProcessingError> {
     let bytes = download_file("https://meta.modrinth.com/fabric/v0/manifest.json", None).await?;
-    let version_manifest: ModloaderVersionsManifest = serde_json::from_slice(&bytes)?;
+    let version_manifest: ModloaderVersionsManifest =
+        serde_json::from_slice(&bytes).context(DesearializationSnafu)?;
     let loaders = &version_manifest
         .game_versions
         .iter()
-        .next()
-        .context("Can't find the desired game version")?
+        .find(|x| x.id == game_version)
+        .context(GameVersionNotExistSnafu {
+            desired: game_version,
+        })?
         .loaders;
     let loader_url = &match fabric_version {
         Some(x) => loaders.iter().find(|y| y.id == x),
         None => loaders.first(),
     }
-    .context("Can't find the forge manifest")?
+    .context(NoManifestSnafu {
+        modloader_type: ModLoaderType::Fabric,
+    })?
     .url;
-    download_file(&loader_url, None).await
+    download_file(&loader_url, None).await.map_err(Into::into)
 }
 
 pub async fn prepare_modloader_download<'a>(
@@ -141,25 +174,30 @@ pub async fn prepare_modloader_download<'a>(
     mut launch_args: LaunchArgs,
     jvm_options: JvmOptions,
     game_options: GameOptions,
-) -> Result<(DownloadArgs, ProcessedArguments, Value)> {
+) -> Result<(DownloadArgs, ProcessedArguments, Value), ManifestProcessingError> {
     let bytes = match mod_loader {
         ModLoaderType::NeoForge => {
             fetch_neoforge_manifest(&game_options.game_version_name, None).await?
         }
         ModLoaderType::Forge => fetch_forge_manifest(&game_options.game_version_name, None).await?,
-        ModLoaderType::Quilt => fetch_quilt_manifest(None).await?,
-        ModLoaderType::Fabric => fetch_fabric_manifest(None).await?,
+        ModLoaderType::Quilt => fetch_quilt_manifest(&game_options.game_version_name, None).await?,
+        ModLoaderType::Fabric => {
+            fetch_fabric_manifest(&game_options.game_version_name, None).await?
+        }
     };
 
     let current_size = Arc::new(AtomicUsize::new(0));
     let total_size = Arc::new(AtomicUsize::new(0));
 
-    let mod_loader_manifest: Value = serde_json::from_slice(&bytes)?;
-    let libraries: Vec<ModloaderLibrary> = Vec::<ModloaderLibrary>::deserialize(
-        mod_loader_manifest
-            .get("libraries")
-            .context("modloader library key doesn't exist")?,
-    )?;
+    let mod_loader_manifest: Value =
+        serde_json::from_slice(&bytes).context(DesearializationSnafu)?;
+    let libraries: Vec<ModloaderLibrary> =
+        Vec::<ModloaderLibrary>::deserialize(mod_loader_manifest.get("libraries").context(
+            ManifestLookUpSnafu {
+                key: "mod_loader_manifest[libraries]",
+            },
+        )?)
+        .context(DesearializationSnafu)?;
 
     let libraries = if mod_loader == &ModLoaderType::Quilt || mod_loader == &ModLoaderType::Fabric {
         libraries
@@ -192,9 +230,13 @@ pub async fn prepare_modloader_download<'a>(
                 classpath.insert(path.to_string_lossy().to_string());
             }
             if !path.exists() {
-                fs::create_dir_all(path.parent().context("forge library path doesn't exist")?)
-                    .await?;
-                total_size_clone.fetch_add(artifact.size, Ordering::Relaxed);
+                let parent = path.parent();
+                if let Some(parent) = parent {
+                    fs::create_dir_all(parent)
+                        .await
+                        .context(IoSnafu { path: parent })?;
+                    total_size_clone.fetch_add(artifact.size, Ordering::Relaxed);
+                }
             } else if let Err(err) = validate_sha1(&path, &sha1).await {
                 total_size_clone.fetch_add(artifact.size, Ordering::Relaxed);
                 error!("{err}\n redownloading");
@@ -204,18 +246,21 @@ pub async fn prepare_modloader_download<'a>(
                 if !path.exists() {
                     total_size_clone.fetch_add(artifact.size, Ordering::Relaxed);
                     let bytes = download_file(&url, current_size_clone).await?;
-                    fs::write(path, bytes).await.map_err(|err| anyhow!(err))
+                    fs::write(&path, bytes).await.context(IoSnafu { path })?;
+                    Ok(())
                 } else if let Err(_) = validate_sha1(&path, &sha1).await {
                     let bytes = download_file(&url, current_size_clone).await?;
-                    fs::write(path, bytes).await.map_err(|err| anyhow!(err))
+                    fs::write(&path, bytes).await.context(IoSnafu { path })?;
+                    Ok(())
                 } else {
                     debug!("hash verified");
                     Ok(())
                 }
             }));
         } else {
-            let name = convert_maven_to_path(&library.name, None)?;
-            let url = library.url.context("url doesn't exist")? + &name;
+            let name = convert_maven_to_path(&library.name, None)
+                .context(MavenPathTranslationSnafu { str: library.name })?;
+            let url = library.url.context(LibraryUrlNotExistSnafu)? + &name;
             let path = library_directory.join(name);
 
             if library.include_in_classpath {
@@ -224,10 +269,14 @@ pub async fn prepare_modloader_download<'a>(
 
             if !path.exists() {
                 handles.push(Box::pin(async move {
-                    fs::create_dir_all(path.parent().context("library parent dir doesn't exist")?)
-                        .await?;
-                    let bytes = download_file(&url, None).await?;
-                    fs::write(path, bytes).await.map_err(|err| anyhow!(err))
+                    if let Some(parent) = path.parent() {
+                        fs::create_dir_all(parent)
+                            .await
+                            .context(IoSnafu { path: parent })?;
+                        let bytes = download_file(&url, None).await?;
+                        fs::write(&path, bytes).await.context(IoSnafu { path })?;
+                    }
+                    Ok(())
                 }));
             }
         }
@@ -238,7 +287,7 @@ pub async fn prepare_modloader_download<'a>(
         let classpaths = launch_args
             .jvm_args
             .get_mut(pos + 1)
-            .context("the next argument of -cp doesn't exist")?;
+            .context(NoClassPathSnafu)?;
         let mut a = classpaths
             .split(':')
             .map(ToString::to_string)

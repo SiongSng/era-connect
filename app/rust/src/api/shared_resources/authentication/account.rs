@@ -1,12 +1,11 @@
 use std::path::PathBuf;
 
-use anyhow::Context;
 use image::{imageops, DynamicImage, ImageFormat};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 pub use uuid::Uuid;
 
-use crate::api::backend_exclusive::download::download_file;
+use crate::api::backend_exclusive::download::{download_file, DownloadError};
 use crate::api::shared_resources::entry::DATA_DIR;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -49,20 +48,39 @@ pub struct AccountToken {
     pub expires_at: i64,
 }
 
+use snafu::prelude::*;
+
+#[derive(Snafu, Debug)]
+pub enum AccountError {
+    #[snafu(display("Failed to download skin"))]
+    SkinDownload { source: DownloadError },
+    #[snafu(display("IO errors at: {path:?}"))]
+    Io {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[snafu(transparent)]
+    ImageError { source: image::ImageError },
+}
+
 impl MinecraftSkin {
-    pub async fn download_skin(&self) -> anyhow::Result<()> {
+    pub async fn download_skin(&self) -> Result<(), AccountError> {
         let raw_image = download_file(&self.url, None)
             .await
-            .context("Failed to download skin")?;
+            .context(SkinDownloadSnafu)?;
 
         let head_image = Self::obtain_player_head(&raw_image)?;
 
-        fs::create_dir_all(self.get_skin_directory())
+        let skin_directory = self.get_skin_directory();
+
+        let skin = self.get_raw_file_path();
+
+        fs::create_dir_all(&skin_directory).await.context(IoSnafu {
+            path: skin_directory,
+        })?;
+        fs::write(&skin, raw_image)
             .await
-            .context("Failed to create skin directory")?;
-        fs::write(self.get_raw_file_path(), raw_image)
-            .await
-            .context("Failed to save raw skin")?;
+            .context(IoSnafu { path: skin })?;
         head_image.save_with_format(self.get_head_file_path(), ImageFormat::Png)?;
 
         Ok(())

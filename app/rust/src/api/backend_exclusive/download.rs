@@ -9,12 +9,12 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{bail, Context};
 use bytes::{BufMut, Bytes, BytesMut};
-use dioxus::{dioxus_core::SpawnIfAsync, prelude::spawn, signals::Readable};
+use dioxus::{dioxus_core::SpawnIfAsync, signals::Readable};
 use dioxus_logger::tracing::{debug, error};
 use futures::{future::BoxFuture, StreamExt};
 use reqwest::Url;
+use snafu::Whatever;
 use tokio::{
     fs::{self, File},
     io::{AsyncReadExt, BufReader},
@@ -27,28 +27,70 @@ use crate::api::shared_resources::{
     entry::{DOWNLOAD_PROGRESS, STORAGE},
 };
 
-pub type HandlesType<Out = anyhow::Result<()>> = Vec<BoxFuture<'static, Out>>;
+use snafu::prelude::*;
+
+use super::{errors::ManifestProcessingError, vanilla::library::LibraryError};
+
+#[derive(Debug, Snafu)]
+pub enum HandleError {
+    #[snafu(context(false), display("Downloading not success"))]
+    Download { source: DownloadError },
+    #[snafu(transparent)]
+    ManifestProcessingError { source: ManifestProcessingError },
+}
+
+impl From<LibraryError> for HandleError {
+    fn from(value: LibraryError) -> Self {
+        Self::ManifestProcessingError {
+            source: value.into(),
+        }
+    }
+}
+
+pub type HandlesType<Out = Result<(), HandleError>> = Vec<BoxFuture<'static, Out>>;
+
+#[derive(Debug, Snafu)]
+pub enum DownloadError {
+    #[snafu(display("Internet Error, could not download {url}"))]
+    Internet { source: reqwest::Error, url: String },
+    #[snafu(display("Could not read file at: {path}"))]
+    Io {
+        source: std::io::Error,
+        path: String,
+    },
+    #[snafu(display("Url parse error, {url}"))]
+    Parse { url: String },
+    #[snafu(display("Hash does not match, expected: {expected}\n get: {get}"))]
+    HashValidation { expected: String, get: String },
+    #[snafu(context(false), display("Not hashable"))]
+    FromHex { source: hex::FromHexError },
+}
 
 pub async fn save_url(
     url: impl AsRef<str> + Send + Sync,
     current_size: impl Into<Option<Arc<AtomicUsize>>>,
     filename: impl AsRef<Path>,
-) -> anyhow::Result<()> {
+) -> Result<(), DownloadError> {
     let bytes = download_file(url, current_size).await?;
-    fs::write(filename, &bytes).await?;
+    fs::write(filename.as_ref(), &bytes)
+        .await
+        .context(IoSnafu {
+            path: filename.as_ref().to_string_lossy().to_string(),
+        })?;
     Ok(())
 }
 
 pub async fn download_file(
     url: impl AsRef<str> + Send + Sync,
     current_size: impl Into<Option<Arc<AtomicUsize>>>,
-) -> Result<Bytes, anyhow::Error> {
-    let url = url.as_ref();
+) -> Result<Bytes, DownloadError> {
     let current_size = current_size.into();
+    let url = url.as_ref();
     let client = reqwest::Client::builder()
         .tcp_keepalive(Some(std::time::Duration::from_secs(10)))
         .http2_keep_alive_timeout(std::time::Duration::from_secs(10))
-        .build()?;
+        .build()
+        .context(InternetSnafu { url })?;
     let response_result = client.get(url).send().await;
 
     let retry_amount = 3;
@@ -71,7 +113,8 @@ pub async fn download_file(
             }
             temp
         }
-    }?;
+    }
+    .context(InternetSnafu { url })?;
 
     let bytes = match chunked_download(response, current_size.clone()).await {
         Ok(x) => x,
@@ -80,9 +123,17 @@ pub async fn download_file(
             if let Some(ref size) = current_size {
                 size.fetch_sub(err.1, Ordering::Relaxed);
             }
-            chunked_download(client.get(url).send().await?, current_size)
-                .await
-                .map_err(|err| err.0)?
+            chunked_download(
+                client
+                    .get(url)
+                    .send()
+                    .await
+                    .context(InternetSnafu { url })?,
+                current_size,
+            )
+            .await
+            .map_err(|err| err.0)
+            .context(InternetSnafu { url })?
         }
     };
 
@@ -103,50 +154,64 @@ async fn chunked_download(
     Ok(bytes.freeze())
 }
 
-pub fn extract_filename(url: impl AsRef<str> + Send + Sync) -> anyhow::Result<String> {
-    let parsed_url = Url::parse(url.as_ref())?;
-    let path_segments = parsed_url.path_segments().context("Invalid URL")?;
-    let filename = path_segments.last().context("No filename found in URL")?;
+#[derive(Debug, Snafu)]
+pub enum FileNameError {
+    #[snafu(display("Failed to parse url: {url}"))]
+    UrlParsingIssues { url: String },
+    #[snafu(display("Parsed url cannot be base"))]
+    CannotBeBase,
+    #[snafu(display("Filename has not been found in the URL"))]
+    AbscenceFilename,
+}
+
+pub fn extract_filename(url: impl AsRef<str> + Send + Sync) -> Result<String, FileNameError> {
+    let parsed_url = Url::parse(url.as_ref()).map_err(|_| FileNameError::UrlParsingIssues {
+        url: url.as_ref().to_string(),
+    })?;
+    let path_segments = parsed_url.path_segments().context(CannotBeBaseSnafu)?;
+    let filename = path_segments.last().context(AbscenceFilenameSnafu)?;
     Ok(filename.to_owned())
 }
 
 pub async fn validate_sha1(
     file_path: impl AsRef<Path> + Send + Sync,
     sha1: &str,
-) -> anyhow::Result<()> {
+) -> Result<(), DownloadError> {
     use sha1::{Digest, Sha1};
     let file_path = file_path.as_ref();
-    let file = File::open(file_path).await?;
+    let file = File::open(file_path).await.context(IoSnafu {
+        path: file_path.to_string_lossy().to_string(),
+    })?;
     let mut buffer = Vec::new();
     let mut reader = BufReader::new(file);
-    reader.read_to_end(&mut buffer).await?;
+    reader.read_to_end(&mut buffer).await.context(IoSnafu {
+        path: file_path.to_string_lossy().to_string(),
+    })?;
 
     let mut hasher = Sha1::new();
     hasher.update(&buffer);
     let result = &hasher.finalize()[..];
 
     if result != hex::decode(sha1)? {
-        bail!(
-            r#"
-{} hash don't fit!
-get: {}
-expected: {}
-"#,
-            file_path.to_string_lossy(),
-            hex::encode(result),
-            sha1
-        );
+        return Err(DownloadError::HashValidation {
+            expected: hex::encode(result),
+            get: sha1.to_string(),
+        });
     }
 
     Ok(())
 }
-pub async fn get_hash(file_path: impl AsRef<Path> + Send + Sync) -> anyhow::Result<Vec<u8>> {
+pub async fn get_hash(file_path: impl AsRef<Path> + Send + Sync) -> Result<Vec<u8>, DownloadError> {
     use sha1::{Digest, Sha1};
     let file_path = file_path.as_ref();
-    let file = File::open(file_path).await?;
+    let file = File::open(file_path).await.context(IoSnafu {
+        path: file_path.to_string_lossy().to_string(),
+    })?;
     let mut buffer = Vec::new();
     let mut reader = BufReader::new(file);
-    reader.read_to_end(&mut buffer).await?;
+    reader.read_to_end(&mut buffer).await.context(IoSnafu {
+        path: file_path.to_string_lossy().to_string(),
+    })?;
     let mut hasher = Sha1::new();
     hasher.update(&buffer);
     let mut vec = Vec::new();
@@ -320,7 +385,7 @@ pub async fn execute_and_progress(
     download_args: DownloadArgs,
     bias: DownloadBias,
     download_type: DownloadType,
-) -> anyhow::Result<()> {
+) {
     debug!("receiving download request");
     let calculate_speed = download_args.is_size;
     let download_complete = Arc::new(AtomicBool::new(false));
@@ -357,7 +422,6 @@ pub async fn execute_and_progress(
     handle.spawn().await.await;
 
     debug!("finish download request");
-    Ok(())
 }
 
 pub async fn rolling_average(
@@ -447,7 +511,7 @@ pub async fn rolling_average(
     }
 }
 
-pub async fn join_futures(handles: HandlesType) -> Result<(), anyhow::Error> {
+pub async fn join_futures(handles: HandlesType) -> Result<(), Whatever> {
     let concurrent_limit = STORAGE
         .global_settings
         .read()
@@ -457,7 +521,8 @@ pub async fn join_futures(handles: HandlesType) -> Result<(), anyhow::Error> {
         .map(|x| tokio::spawn(x))
         .buffer_unordered(concurrent_limit);
     while let Some(x) = download_stream.next().await {
-        x??;
+        x.unwrap().unwrap();
+        // x.with_whatever_context(|x| whatever!("tokio spawn error: {x:?}"))?;
     }
     Ok(())
 }
