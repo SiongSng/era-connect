@@ -36,8 +36,8 @@ semver = "1.0.23"
 once_cell = "1.19.0"
 furse = "1.5.15"
 derive_more = "0.99.18"
-dioxus = { git = "https://github.com/DioxusLabs/dioxus", version = "0.5.2" }
+dioxus = { git = "https://github.com/DioxusLabs/dioxus" }
 thiserror = "1.0.63"
 ordermap = "0.5.0"
-dioxus-logger = { git = "https://github.com/DogeDark/dioxus-logger", version = "0.5.1" }
+dioxus-logger = { git = "https://github.com/DogeDark/dioxus-logger" }
 snafu = "0.8.4"

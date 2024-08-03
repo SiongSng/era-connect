@@ -7,7 +7,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use dioxus_logger::tracing::{debug, error};
+use dioxus_logger::tracing::{debug, error, warn};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use snafu::prelude::*;
@@ -54,10 +54,10 @@ struct ModloaderVersionsManifest {
 struct ModloaderVersion {
     id: String,
     stable: bool,
-    loaders: Vec<ForgeLoaders>,
+    loaders: Vec<Loaders>,
 }
 #[derive(Debug, Serialize, Deserialize, Clone)]
-struct ForgeLoaders {
+struct Loaders {
     id: String,
     url: String,
     stable: bool,
@@ -127,7 +127,9 @@ async fn fetch_quilt_manifest(
     let loaders = &version_manifest
         .game_versions
         .iter()
-        .find(|x| x.id == game_version)
+        .map(|x| (x, x.id.replace("${modrinth.gameVersion}", game_version)))
+        .find(|x| x.1 == game_version)
+        .map(|x| x.0)
         .context(GameVersionNotExistSnafu {
             desired: game_version,
         })?
@@ -153,7 +155,9 @@ async fn fetch_fabric_manifest(
     let loaders = &version_manifest
         .game_versions
         .iter()
-        .find(|x| x.id == game_version)
+        .map(|x| (x, x.id.replace("${modrinth.gameVersion}", game_version)))
+        .find(|x| x.1 == game_version)
+        .map(|x| x.0)
         .context(GameVersionNotExistSnafu {
             desired: game_version,
         })?
