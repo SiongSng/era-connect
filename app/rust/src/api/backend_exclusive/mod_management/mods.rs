@@ -1,3 +1,5 @@
+use chrono::DateTime;
+use chrono::Utc;
 use dioxus_logger::tracing::warn;
 use ferinth::structures::search::Facet;
 use ferinth::structures::search::Sort;
@@ -93,6 +95,8 @@ pub struct ModMetadata {
     pub overrides: Vec<ModOverride>,
     pub incompatiable_mods: Option<Vec<ModMetadata>>,
     pub icon_url: Option<Url>,
+    pub last_updated: DateTime<Utc>,
+    // pub project: Project,
     icon_directory: PathBuf,
     mod_data: RawModData,
 }
@@ -105,6 +109,33 @@ impl ModMetadata {
                 self.project_id.to_string(),
                 extract_filename(icon.to_string()).unwrap()
             ))
+        })
+    }
+
+    pub async fn needs_update(&self) -> Result<bool, ModError> {
+        let ferinth = &FERINTH;
+        let furse = &FURSE;
+        Ok(match &self.mod_data {
+            RawModData::Modrinth(modrinth) => {
+                let new = ferinth
+                    .get_project(&modrinth.project_id)
+                    .await
+                    .map_err(Into::into)
+                    .context(ModNotExistSnafu {
+                        name: &modrinth.project_id,
+                    })?;
+                new.updated > self.last_updated
+            }
+            RawModData::Curseforge { data, .. } => {
+                let new = furse
+                    .get_mod(data.mod_id)
+                    .await
+                    .map_err(Into::into)
+                    .context(ModNotExistSnafu {
+                        name: data.mod_id.to_string(),
+                    })?;
+                new.date_modified > self.last_updated
+            }
         })
     }
 
@@ -159,7 +190,7 @@ impl PartialOrd for ModMetadata {
                 return Some(x.cmp(&y));
             }
         }
-        None
+        Some(self.last_updated.cmp(&other.last_updated))
     }
 }
 
@@ -168,6 +199,7 @@ impl PartialEq for ModMetadata {
         self.project_id == other.project_id
     }
 }
+
 impl Eq for ModMetadata {}
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -185,7 +217,7 @@ impl ToString for ProjectId {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, derive_more::From)]
 pub enum RawModData {
     Modrinth(ferinth::structures::version::Version),
     Curseforge {
@@ -194,46 +226,10 @@ pub enum RawModData {
     },
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, derive_more::From)]
 pub enum Project {
     Modrinth(ferinth::structures::project::Project),
     Curseforge(furse::structures::mod_structs::Mod),
-}
-
-impl From<ferinth::structures::project::Project> for Project {
-    fn from(value: ferinth::structures::project::Project) -> Self {
-        Self::Modrinth(value)
-    }
-}
-impl From<furse::structures::mod_structs::Mod> for Project {
-    fn from(value: furse::structures::mod_structs::Mod) -> Self {
-        Self::Curseforge(value)
-    }
-}
-
-impl From<ferinth::structures::version::Version> for RawModData {
-    fn from(value: ferinth::structures::version::Version) -> Self {
-        Self::Modrinth(value)
-    }
-}
-
-impl
-    From<(
-        furse::structures::file_structs::File,
-        furse::structures::file_structs::FileIndex,
-    )> for RawModData
-{
-    fn from(
-        value: (
-            furse::structures::file_structs::File,
-            furse::structures::file_structs::FileIndex,
-        ),
-    ) -> Self {
-        Self::Curseforge {
-            data: value.0,
-            metadata: value.1,
-        }
-    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -374,7 +370,7 @@ impl ModManager {
 
     // TODO: furse mode not implemetned yet
     pub async fn scan(&mut self) -> Result<(), ModError> {
-        let modrinth = &FERINTH;
+        let ferinth = &FERINTH;
         let mod_path = self.game_directory.join("mods");
         if !mod_path.exists() {
             create_dir_all(&mod_path).context(IoSnafu {
@@ -405,7 +401,7 @@ impl ModManager {
                     .unwrap_or_default()
                     .to_string_lossy()
                     .to_string();
-                let version = modrinth
+                let version = ferinth
                     .get_version_from_hash(&hash)
                     .await
                     .map_err(Into::into)
@@ -483,7 +479,7 @@ impl ModManager {
         tag: Vec<Tag>,
         mod_override: Vec<ModOverride>,
     ) -> Result<(), ModError> {
-        let (mod_metadata, is_fabric_api) = Self::raw_mod_transformation(
+        let (new, is_fabric_api) = Self::raw_mod_transformation(
             self.icon_directory.clone(),
             minecraft_mod_data,
             mod_override.clone(),
@@ -491,14 +487,12 @@ impl ModManager {
         )
         .await?;
 
-        if let Some(previous) = self.mods.iter_mut().find(|x| **x == mod_metadata) {
-            if let Some(order) = mod_metadata.partial_cmp(&previous) {
-                if order == cmp::Ordering::Greater {
-                    *previous = mod_metadata;
-                }
+        if let Some(previous) = self.mods.iter_mut().find(|x| **x == new) {
+            if new > *previous {
+                *previous = new;
             }
         } else {
-            self.mod_dependencies_resolve(&mod_metadata.mod_data, mod_override)
+            self.mod_dependencies_resolve(&new.mod_data, mod_override)
                 .await?;
             if self.mod_loader.mod_loader_type == ModLoaderType::Quilt && is_fabric_api {
                 let project = (&FERINTH)
@@ -511,7 +505,7 @@ impl ModManager {
                 self.add_project(project.into(), vec![Tag::Dependencies], vec![])
                     .await?;
             } else {
-                self.mods.push(mod_metadata);
+                self.mods.push(new);
             }
         }
         Ok(())
@@ -588,17 +582,19 @@ impl ModManager {
                         name: minecraft_mod.project_id.to_string(),
                     })?;
                 ModMetadata {
-                    name: project.title,
+                    name: project.title.clone(),
                     project_id: ProjectId::Modrinth(minecraft_mod.project_id.clone()),
-                    long_description: project.body,
-                    short_description: project.description,
+                    long_description: project.body.clone(),
+                    short_description: project.description.clone(),
                     mod_version: Some(minecraft_mod.version_number.clone()),
                     tag,
                     incompatiable_mods: None,
                     overrides: mod_override,
                     mod_data: minecraft_mod_data,
-                    icon_url: project.icon_url,
+                    icon_url: project.icon_url.clone(),
                     icon_directory,
+                    last_updated: project.updated,
+                    // project: Project::Modrinth(project),
                 }
             }
             RawModData::Curseforge {
@@ -614,17 +610,18 @@ impl ModManager {
                     })?;
                 let icon_url = project
                     .logo
+                    .clone()
                     .map(|x| Url::parse(&x.thumbnail_url))
                     .transpose()
                     .expect("not valid url");
                 ModMetadata {
-                    name: project.name,
+                    name: project.name.clone(),
                     project_id: ProjectId::Curseforge(minecraft_mod.mod_id),
                     long_description: FURSE
                         .get_mod_description(project.id)
                         .await
                         .map_err(Into::<FetchError>::into)?,
-                    short_description: project.summary,
+                    short_description: project.summary.clone(),
                     mod_version: None,
                     tag,
                     incompatiable_mods: None,
@@ -632,6 +629,8 @@ impl ModManager {
                     mod_data: minecraft_mod_data,
                     icon_url,
                     icon_directory,
+                    last_updated: project.date_modified,
+                    // project: Project::Curseforge(project),
                 }
             }
         };
