@@ -112,7 +112,7 @@ impl CollectionId {
             .with_mut(|x| x.get_mut(self).unwrap().with_mut(f))
     }
 
-    pub fn try_get_mut_collection(&self) -> Option<Write<'static, Collection>> {
+    pub fn try_get_raw_mut_collection(&self) -> Option<Write<'static, Collection>> {
         Write::filter_map(STORAGE.collections.write(), |write| write.get_mut(self))
     }
 }
