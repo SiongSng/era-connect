@@ -12,9 +12,9 @@ use once_cell::sync::Lazy;
 use reqwest::Url;
 use serde::Deserialize;
 use serde::Serialize;
-use std::cmp;
 use std::cmp::Reverse;
 use std::fs::create_dir_all;
+use std::io;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicUsize;
@@ -88,6 +88,8 @@ pub type ModrinthSearchResponse = ferinth::structures::search::Response;
 pub struct ModMetadata {
     pub name: String,
     pub project_id: ProjectId,
+    pub enabled: bool,
+    pub authors: Vec<String>,
     pub long_description: String,
     pub short_description: String,
     pub mod_version: Option<String>,
@@ -98,7 +100,13 @@ pub struct ModMetadata {
     pub last_updated: DateTime<Utc>,
     // pub project: Project,
     icon_directory: PathBuf,
+    game_directory: PathBuf,
     mod_data: RawModData,
+}
+
+pub enum Platform {
+    Modrinth,
+    Curseforge,
 }
 
 impl ModMetadata {
@@ -110,6 +118,67 @@ impl ModMetadata {
                 extract_filename(icon.to_string()).unwrap()
             ))
         })
+    }
+
+    pub fn platform(&self) -> Platform {
+        match self.mod_data {
+            RawModData::Modrinth(_) => Platform::Modrinth,
+            RawModData::Curseforge { .. } => Platform::Curseforge,
+        }
+    }
+
+    pub async fn disable(&mut self) -> io::Result<()> {
+        for file in self
+            .get_filepaths()?
+            .into_iter()
+            .filter(|x| x.extension() != Some("disabled".as_ref()))
+        {
+            let new = file
+                .extension()
+                .map(|original| {
+                    let mut os_str = original.to_os_string();
+                    os_str.push(".disabled");
+                    file.with_extension(os_str)
+                })
+                .unwrap();
+            tokio::fs::rename(&file, new).await?;
+        }
+        self.enabled = false;
+        Ok(())
+    }
+
+    pub async fn enable(&mut self) -> io::Result<()> {
+        for file in self
+            .get_filepaths()?
+            .into_iter()
+            .filter(|x| x.extension() == Some("disabled".as_ref()))
+        {
+            tokio::fs::rename(&file, file.with_extension("")).await?;
+        }
+        self.enabled = true;
+        Ok(())
+    }
+
+    pub fn get_filepaths(&self) -> io::Result<Vec<PathBuf>> {
+        let mut read = std::fs::read_dir(self.base_path())?
+            .map(|x| x.map(|x| x.path()))
+            .collect::<io::Result<Vec<_>>>()?;
+        let target = match &self.mod_data {
+            RawModData::Modrinth(x) => x
+                .files
+                .iter()
+                .map(|x| self.base_path().join(&x.filename))
+                .collect(),
+            RawModData::Curseforge { data, .. } => {
+                vec![self.base_path().join(&data.file_name)]
+            }
+        };
+        read.retain(|x| target.contains(x) || target.contains(&x.with_extension("")));
+        Ok(read)
+    }
+
+    pub fn base_path(&self) -> PathBuf {
+        self.game_directory.join("mods")
     }
 
     pub async fn needs_update(&self) -> Result<bool, ModError> {
@@ -148,13 +217,12 @@ impl ModMetadata {
     }
 
     /// game_directory is from `collection.game_directory`
-    pub async fn mod_is_downloaded(&self, game_directory: impl AsRef<Path>) -> bool {
-        let base_path = game_directory.as_ref().join("mods");
-        let base_path = base_path.as_path();
+    pub async fn mod_is_downloaded(&self) -> bool {
         match &self.mod_data {
             RawModData::Modrinth(x) => {
                 tokio_stream::iter(x.files.iter())
                     .all(|file| async move {
+                        let base_path = self.base_path();
                         let hash = &file.hashes.sha1;
                         let filename = &file.filename;
                         let path = base_path.join(filename);
@@ -172,6 +240,7 @@ impl ModMetadata {
                 let url = file.download_url.as_ref();
                 if url.is_some() {
                     let filename = &file.file_name;
+                    let base_path = self.base_path();
                     let path = base_path.join(filename);
                     hashes_validate(path, &hashes).await
                 } else {
@@ -275,7 +344,7 @@ impl ModManager {
 
     pub async fn all_downloaded(&self) -> bool {
         tokio_stream::iter(self.mods.iter())
-            .all(|minecraft_mod| minecraft_mod.mod_is_downloaded(&self.game_directory))
+            .all(|minecraft_mod| minecraft_mod.mod_is_downloaded())
             .await
     }
 
@@ -481,6 +550,7 @@ impl ModManager {
     ) -> Result<(), ModError> {
         let (new, is_fabric_api) = Self::raw_mod_transformation(
             self.icon_directory.clone(),
+            self.game_directory.clone(),
             minecraft_mod_data,
             mod_override.clone(),
             tag,
@@ -521,10 +591,12 @@ impl ModManager {
             .map(|mod_metadata| {
                 let mod_override_cloned = mod_override.clone();
                 let icon_directory_cloned = self.icon_directory.clone();
+                let game_directory_cloned = self.game_directory.clone();
                 let tag_cloned = tag.clone();
                 tokio::spawn(async move {
                     let (mod_metadata, is_fabric_api) = Self::raw_mod_transformation(
                         icon_directory_cloned,
+                        game_directory_cloned,
                         mod_metadata,
                         mod_override_cloned,
                         tag_cloned,
@@ -564,6 +636,7 @@ impl ModManager {
 
     async fn raw_mod_transformation(
         icon_directory: PathBuf,
+        game_directory: PathBuf,
         minecraft_mod_data: RawModData,
         mod_override: Vec<ModOverride>,
         tag: Vec<Tag>,
@@ -581,6 +654,11 @@ impl ModManager {
                     .context(ModNotExistSnafu {
                         name: minecraft_mod.project_id.to_string(),
                     })?;
+                let memebers = FERINTH
+                    .list_team_members(&project.team)
+                    .await
+                    .map_err(Into::<FetchError>::into)?;
+                let authors = memebers.into_iter().map(|x| x.user.username).collect();
                 ModMetadata {
                     name: project.title.clone(),
                     project_id: ProjectId::Modrinth(minecraft_mod.project_id.clone()),
@@ -594,6 +672,9 @@ impl ModManager {
                     icon_url: project.icon_url.clone(),
                     icon_directory,
                     last_updated: project.updated,
+                    authors,
+                    enabled: true,
+                    game_directory,
                     // project: Project::Modrinth(project),
                 }
             }
@@ -614,6 +695,7 @@ impl ModManager {
                     .map(|x| Url::parse(&x.thumbnail_url))
                     .transpose()
                     .expect("not valid url");
+                let authors = project.authors.into_iter().map(|x| x.name).collect();
                 ModMetadata {
                     name: project.name.clone(),
                     project_id: ProjectId::Curseforge(minecraft_mod.mod_id),
@@ -630,6 +712,9 @@ impl ModManager {
                     icon_url,
                     icon_directory,
                     last_updated: project.date_modified,
+                    authors,
+                    enabled: true,
+                    game_directory,
                     // project: Project::Curseforge(project),
                 }
             }

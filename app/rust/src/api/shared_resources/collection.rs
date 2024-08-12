@@ -58,30 +58,18 @@ use super::entry::STORAGE;
 #[serde_with::serde_as]
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 pub struct Collection {
-    display_name: String,
-    minecraft_version: VersionMetadata,
-    mod_controller: Option<ModController>,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
+    pub display_name: String,
+    pub minecraft_version: VersionMetadata,
+    pub mod_controller: Option<ModController>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
     #[serde_as(as = "serde_with::DurationSeconds<i64>")]
-    played_time: Duration,
-    advanced_options: Option<AdvancedOptions>,
-    picture_path: PathBuf,
+    pub played_time: Duration,
+    pub advanced_options: Option<AdvancedOptions>,
+    pub picture_path: PathBuf,
 
     entry_path: PathBuf,
     launch_args: Option<LaunchArgs>,
-}
-
-pub struct CollectionViewMut<'a> {
-    pub display_name: &'a mut String,
-    pub minecraft_version: &'a mut VersionMetadata,
-    pub mod_controller: Option<&'a mut ModController>,
-    pub created_at: &'a mut DateTime<Utc>,
-    pub updated_at: &'a mut DateTime<Utc>,
-    pub played_time: &'a mut Duration,
-    pub advanced_options: Option<&'a mut AdvancedOptions>,
-    pub picture_path: &'a mut PathBuf,
-    pub entry_path: &'a mut PathBuf,
 }
 
 #[derive(
@@ -91,7 +79,7 @@ pub struct CollectionId(u64);
 
 impl CollectionId {
     pub fn try_get_collection_owned(&self) -> Option<Collection> {
-        (STORAGE.collections)().get(self).cloned()
+        STORAGE.collections.with(|x| x.get(self).cloned())
     }
     pub fn get_collection_owned(&self) -> Collection {
         self.try_get_collection_owned().unwrap()
@@ -103,17 +91,27 @@ impl CollectionId {
             .map(move |x| x.get(&self).unwrap())
     }
 
-    pub fn with_mut_collection(
+    pub fn with_mut_collection<T>(
         &self,
-        f: impl FnOnce(CollectionViewMut),
-    ) -> Result<(), CollectionError> {
+        f: impl FnOnce(&mut Collection) -> T,
+    ) -> Result<T, CollectionError> {
         STORAGE
             .collections
             .with_mut(|x| x.get_mut(self).unwrap().with_mut(f))
     }
 
-    pub fn try_get_raw_mut_collection(&self) -> Option<Write<'static, Collection>> {
-        Write::filter_map(STORAGE.collections.write(), |write| write.get_mut(self))
+    /// Usage typically paired with use_coroutine, prevent crossing async boundries
+    pub fn replace(&self, collection: Collection) -> Result<(), CollectionError> {
+        collection.save_collection_file()?;
+        let collection_to_replace = &mut *self.get_raw_mut_collection();
+        *collection_to_replace = collection;
+        Ok(())
+    }
+
+    pub fn get_raw_mut_collection(&self) -> Write<'static, Collection> {
+        Write::map(STORAGE.collections.write(), |write| {
+            write.get_mut(self).unwrap()
+        })
     }
 }
 
@@ -165,24 +163,13 @@ impl Collection {
         self.entry_path.as_path()
     }
 
-    pub fn with_mut(&mut self, f: impl FnOnce(CollectionViewMut)) -> Result<(), CollectionError> {
-        f(CollectionViewMut {
-            display_name: &mut self.display_name,
-            minecraft_version: &mut self.minecraft_version,
-            mod_controller: self.mod_controller.as_mut(),
-            created_at: &mut self.created_at,
-            updated_at: &mut self.updated_at,
-            played_time: &mut self.played_time,
-            advanced_options: self.advanced_options.as_mut(),
-            picture_path: &mut self.picture_path,
-            entry_path: &mut self.entry_path,
-        });
-        StorageLoader::new(
-            COLLECTION_FILE_NAME.to_string(),
-            Cow::Borrowed(&self.entry_path),
-        )
-        .save(&self)
-        .map_err(Into::into)
+    pub fn with_mut<T>(
+        &mut self,
+        f: impl FnOnce(&mut Collection) -> T,
+    ) -> Result<T, CollectionError> {
+        let v = f(self);
+        self.save_collection_file()?;
+        Ok(v)
     }
     /// Creates a collection and return a collection with its loader attached
     pub async fn create(
@@ -347,6 +334,15 @@ impl Collection {
         let mut hasher = DefaultHasher::new();
         id.hash(&mut hasher);
         CollectionId(hasher.finish())
+    }
+
+    pub fn save_collection_file(&self) -> Result<(), CollectionError> {
+        StorageLoader::new(
+            COLLECTION_FILE_NAME.to_string(),
+            Cow::Borrowed(&self.entry_path),
+        )
+        .save(&self)?;
+        Ok(())
     }
 
     fn save(&self) -> Result<(), CollectionError> {

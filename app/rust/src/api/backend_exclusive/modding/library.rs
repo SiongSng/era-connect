@@ -7,7 +7,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use dioxus_logger::tracing::{debug, error, warn};
+use dioxus_logger::tracing::{debug, error};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use snafu::prelude::*;

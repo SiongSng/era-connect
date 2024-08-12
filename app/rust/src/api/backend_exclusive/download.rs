@@ -10,7 +10,7 @@ use std::{
 };
 
 use bytes::{BufMut, Bytes, BytesMut};
-use dioxus::{dioxus_core::SpawnIfAsync, hooks::use_future, signals::Readable};
+use dioxus::{dioxus_core::SpawnIfAsync, signals::Readable};
 use dioxus_logger::tracing::{debug, error};
 use futures::{future::BoxFuture, StreamExt};
 use reqwest::Url;
