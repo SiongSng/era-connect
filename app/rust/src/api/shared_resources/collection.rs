@@ -5,7 +5,7 @@ pub use std::path::PathBuf;
 use std::{borrow::Cow, fs::create_dir_all};
 
 use chrono::{DateTime, Duration, Utc};
-use dioxus::signals::{MappedSignal, Readable, Write};
+use dioxus::signals::{MappedSignal, ReadOnlySignal, Readable, Signal, Writable, Write};
 use dioxus_logger::tracing::info;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -78,17 +78,12 @@ pub struct Collection {
 pub struct CollectionId(u64);
 
 impl CollectionId {
-    pub fn try_get_collection_owned(&self) -> Option<Collection> {
+    pub fn try_get_collection(&self) -> Option<Signal<Collection>> {
         STORAGE.collections.with(|x| x.get(self).cloned())
     }
-    pub fn get_collection_owned(&self) -> Collection {
-        self.try_get_collection_owned().unwrap()
-    }
-    pub fn get_collection(self) -> MappedSignal<Collection> {
-        STORAGE
-            .collections
-            .signal()
-            .map(move |x| x.get(&self).unwrap())
+
+    pub fn get_collection(&self) -> ReadOnlySignal<Collection> {
+        ReadOnlySignal::new(self.try_get_collection().unwrap())
     }
 
     pub fn with_mut_collection<T>(
@@ -97,20 +92,13 @@ impl CollectionId {
     ) -> Result<T, CollectionError> {
         STORAGE
             .collections
-            .with_mut(|x| x.get_mut(self).unwrap().with_mut(f))
+            .with_mut(|x| x.get_mut(self).unwrap().with_mut(|x| x.with_mut(f)))
     }
 
-    /// Usage typically paired with use_coroutine, prevent crossing async boundries
+    // Usage typically paired with use_coroutine, prevent crossing async boundries
     pub fn replace(&self, collection: Collection) -> Result<(), CollectionError> {
-        collection.save_collection_file()?;
-        let collection_to_replace = &mut *self.get_raw_mut_collection();
-        *collection_to_replace = collection;
-        Ok(())
-    }
-
-    pub fn get_raw_mut_collection(&self) -> Write<'static, Collection> {
-        Write::map(STORAGE.collections.write(), |write| {
-            write.get_mut(self).unwrap()
+        self.with_mut_collection(|x| {
+            *x = collection;
         })
     }
 }
@@ -346,21 +334,17 @@ impl Collection {
     }
 
     fn save(&self) -> Result<(), CollectionError> {
-        StorageLoader::new(
-            COLLECTION_FILE_NAME.to_string(),
-            Cow::Borrowed(&self.entry_path),
-        )
-        .save(&self)?;
+        self.save_collection_file()?;
         STORAGE
             .collections
             .write()
             .entry(self.get_collection_id())
             .and_modify(|x| {
-                if x != self {
-                    *x = self.clone();
+                if &*x.peek() != self {
+                    x.set(self.clone());
                 }
             })
-            .or_insert(self.clone());
+            .or_insert(Signal::new(self.clone()));
         Ok(())
     }
 

@@ -1,4 +1,4 @@
-use dioxus::signals::GlobalSignal;
+use dioxus::signals::{GlobalSignal, Signal};
 
 use crate::api::shared_resources::collection::{Collection, CollectionId};
 
@@ -9,7 +9,7 @@ use super::{
 
 pub struct StorageState {
     pub account_storage: GlobalSignal<AccountStorage>,
-    pub collections: GlobalSignal<ordermap::map::OrderMap<CollectionId, Collection>>,
+    pub collections: GlobalSignal<ordermap::map::OrderMap<CollectionId, Signal<Collection>>>,
     pub global_settings: GlobalSignal<GlobalSettings>,
 }
 
@@ -20,7 +20,7 @@ impl StorageState {
             Collection::scan()
                 .unwrap_or_default()
                 .into_iter()
-                .map(|x| (x.get_collection_id(), x))
+                .map(|x| (x.get_collection_id(), Signal::new(x)))
                 .collect()
         });
         let global_settings = GlobalSignal::new(|| GlobalSettings::load().unwrap_or_default());
