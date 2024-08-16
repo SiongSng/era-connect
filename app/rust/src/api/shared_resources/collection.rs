@@ -5,7 +5,7 @@ pub use std::path::PathBuf;
 use std::{borrow::Cow, fs::create_dir_all};
 
 use chrono::{DateTime, Duration, Utc};
-use dioxus::signals::{MappedSignal, ReadOnlySignal, Readable, Signal, Writable, Write};
+use dioxus::signals::{ReadOnlySignal, Readable, Signal, Writable};
 use dioxus_logger::tracing::info;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
