@@ -7,8 +7,9 @@ use std::{
 };
 
 use dioxus_logger::tracing::error;
+use futures::future;
 use serde::{Deserialize, Serialize};
-use tokio::fs;
+use tokio::{fs, sync::Semaphore};
 
 use crate::api::backend_exclusive::{
     download::{download_file, validate_sha1, DownloadError, HandlesType},
@@ -102,71 +103,95 @@ pub async fn parallel_library(
         os: current_os.to_string(),
     })?;
 
-    for index in 0..(library_list).len() {
-        let library_list = Arc::clone(&library_list);
-        let folder = Arc::clone(&folder);
-        let native_folder = Arc::clone(&native_folder);
-        let total_size = Arc::clone(&total_size);
-        let current_size = Arc::clone(&current_size);
-        let current_os = current_os_type.clone();
-        let library = &library_list[index];
-        let path = library.downloads.artifact.path.clone();
-        let (process_native, is_native_library, library_extension) = os_match(&library, current_os);
-        if let Some(path) = &path {
-            let non_native_download_path = folder.join(&path);
-            let non_native_redownload = if non_native_download_path.exists() {
-                if let Err(x) = if !process_native && !is_native_library {
-                    validate_sha1(&non_native_download_path, &library.downloads.artifact.sha1).await
+    let semaphore = Arc::new(Semaphore::new(20));
+    let tasks = (0..(library_list).len())
+        .map(|index| {
+            let library_list = Arc::clone(&library_list);
+            let folder = Arc::clone(&folder);
+            let native_folder = Arc::clone(&native_folder);
+            let total_size = Arc::clone(&total_size);
+            let current_size = Arc::clone(&current_size);
+            let current_os = current_os_type.clone();
+            let semaphore = semaphore.clone();
+            tokio::spawn(async move {
+                let _ = semaphore.acquire();
+                let library_list = Arc::clone(&library_list);
+                let library = &library_list[index];
+                let path = library.downloads.artifact.path.clone();
+                let (process_native, is_native_library, library_extension) =
+                    os_match(&library, current_os);
+                let task = if let Some(path) = &path {
+                    let non_native_download_path = folder.join(&path);
+                    let non_native_redownload = if non_native_download_path.exists() {
+                        if let Err(x) = if !process_native && !is_native_library {
+                            validate_sha1(
+                                &non_native_download_path,
+                                &library.downloads.artifact.sha1,
+                            )
+                            .await
+                        } else {
+                            Ok(())
+                        } {
+                            error!("{x}, \nredownloading.");
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        true
+                    };
+
+                    if !process_native && non_native_redownload {
+                        if let Some(parent_dir) = non_native_download_path.parent() {
+                            fs::create_dir_all(parent_dir)
+                                .await
+                                .context(IoSnafu { path: parent_dir })?;
+                            total_size
+                                .fetch_add(library.downloads.artifact.size, Ordering::Relaxed);
+                        }
+                    }
+                    if process_native {
+                        total_size.fetch_add(library.downloads.artifact.size, Ordering::Relaxed);
+                    }
+
+                    let url = library.downloads.artifact.url.clone();
+                    let library_extension = library_extension.to_string();
+
+                    let handle = Box::pin(async move {
+                        if !process_native && non_native_redownload {
+                            let bytes =
+                                download_file(url.clone(), Arc::clone(&current_size)).await?;
+                            fs::write(&non_native_download_path, bytes).await.context(
+                                errors::IoSnafu {
+                                    path: non_native_download_path,
+                                },
+                            )?;
+                        }
+                        // always download(kinda required for now.)
+                        if process_native {
+                            native_download(
+                                &url.clone(),
+                                current_size,
+                                native_folder,
+                                &library_extension,
+                            )
+                            .await
+                            .map_err(Into::<ManifestProcessingError>::into)?;
+                        }
+                        Ok(())
+                    });
+                    Some(handle)
                 } else {
-                    Ok(())
-                } {
-                    error!("{x}, \nredownloading.");
-                    true
-                } else {
-                    false
-                }
-            } else {
-                true
-            };
+                    None
+                };
+                Ok::<_, LibraryError>(task)
+            })
+        })
+        .collect::<Vec<_>>();
 
-            if !process_native && non_native_redownload {
-                if let Some(parent_dir) = non_native_download_path.parent() {
-                    fs::create_dir_all(parent_dir)
-                        .await
-                        .context(IoSnafu { path: parent_dir })?;
-                    total_size.fetch_add(library.downloads.artifact.size, Ordering::Relaxed);
-                }
-            }
-            if process_native {
-                total_size.fetch_add(library.downloads.artifact.size, Ordering::Relaxed);
-            }
-
-            let url = library.downloads.artifact.url.clone();
-            let library_extension = library_extension.to_string();
-
-            let handle = Box::pin(async move {
-                if !process_native && non_native_redownload {
-                    let bytes = download_file(url.clone(), Arc::clone(&current_size)).await?;
-                    fs::write(&non_native_download_path, bytes)
-                        .await
-                        .context(errors::IoSnafu {
-                            path: non_native_download_path,
-                        })?;
-                }
-                // always download(kinda required for now.)
-                if process_native {
-                    native_download(
-                        &url.clone(),
-                        current_size,
-                        native_folder,
-                        &library_extension,
-                    )
-                    .await
-                    .map_err(Into::<ManifestProcessingError>::into)?;
-                }
-                Ok(())
-            });
-            library_download_handles.push(handle);
+    for x in future::join_all(tasks).await {
+        if let Some(x) = x.unwrap().unwrap() {
+            library_download_handles.push(x);
         }
     }
 

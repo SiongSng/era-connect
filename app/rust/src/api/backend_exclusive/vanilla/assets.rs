@@ -1,4 +1,5 @@
-use dioxus_logger::tracing::{debug, error};
+use dioxus_logger::tracing::error;
+use futures::future;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use snafu::prelude::*;
@@ -6,10 +7,10 @@ use std::{
     path::PathBuf,
     sync::{atomic::AtomicUsize, atomic::Ordering, Arc},
 };
-use tokio::fs;
+use tokio::{fs, sync::Semaphore};
 
 use crate::api::backend_exclusive::{
-    download::{download_file, validate_sha1, HandlesType},
+    download::{download_file, validate_sha1, HandleError, HandlesType},
     errors::*,
 };
 
@@ -103,67 +104,78 @@ pub async fn parallel_assets_download(
     let asset_download_hash = Arc::new(assets.asset_download_hash);
     let asset_download_path = Arc::new(assets.asset_download_path);
     let asset_download_size = Arc::new(assets.asset_download_size);
-    for index in 0..asset_download_list.len() {
-        debug!("downloading asset");
-        let current_size = Arc::clone(current_size);
-        let total_size = Arc::clone(total_size);
-        let asset_download_list = Arc::clone(&asset_download_list);
-        let asset_download_size = Arc::clone(&asset_download_size);
-        let asset_download_hash = Arc::clone(&asset_download_hash);
-        let asset_download_paths = Arc::clone(&asset_download_path);
-        let asset_download_path = &asset_download_paths[index];
-        if let Some(path) = asset_download_path.parent() {
-            fs::create_dir_all(path).await.context(IoSnafu { path })?;
-        }
-        let okto_download = if asset_download_path.exists() {
-            if let Err(x) = validate_sha1(
-                asset_download_path,
-                asset_download_hash
-                    .get(index)
-                    .context(ManifestLookUpSnafu {
-                        key: "asset_download_hash[index]",
-                    })?,
-            )
-            .await
-            {
-                error!("{x}, \nredownloading.");
-                true
-            } else {
-                false
-            }
-        } else {
-            true
-        };
-        if okto_download {
-            total_size.fetch_add(
-                *asset_download_size
-                    .get(index)
-                    .context(ManifestLookUpSnafu {
-                        key: "asset_download_size[index]",
-                    })?,
-                Ordering::Relaxed,
-            );
-        }
-        let asset_download_path = asset_download_path.clone();
-        handles.push(Box::pin(async move {
-            if okto_download {
-                let bytes = download_file(
-                    asset_download_list
-                        .get(index)
-                        .context(ManifestLookUpSnafu {
-                            key: "asset_download_list[index]",
-                        })?,
-                    current_size,
-                )
-                .await?;
-                fs::write(&asset_download_path, bytes)
+    let semaphore = Arc::new(Semaphore::new(20));
+    let tasks = (0..asset_download_list.len())
+        .map(|index| {
+            let current_size = Arc::clone(current_size);
+            let total_size = Arc::clone(total_size);
+            let asset_download_list = Arc::clone(&asset_download_list);
+            let asset_download_size = Arc::clone(&asset_download_size);
+            let asset_download_hash = Arc::clone(&asset_download_hash);
+            let asset_download_paths = Arc::clone(&asset_download_path);
+            let semaphore = semaphore.clone();
+            tokio::spawn(async move {
+                let asset_download_path = &asset_download_paths[index];
+                let _permits = semaphore.acquire().await.unwrap();
+                if let Some(path) = asset_download_path.parent() {
+                    fs::create_dir_all(path).await.context(IoSnafu { path })?;
+                }
+                let okto_download = if asset_download_path.exists() {
+                    if let Err(x) = validate_sha1(
+                        &asset_download_path,
+                        asset_download_hash
+                            .get(index)
+                            .context(ManifestLookUpSnafu {
+                                key: "asset_download_hash[index]",
+                            })?,
+                    )
                     .await
-                    .context(IoSnafu {
-                        path: asset_download_path,
-                    })?;
-            }
-            Ok(())
-        }));
+                    {
+                        error!("{x:#?}, \nredownloading.");
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    true
+                };
+                if okto_download {
+                    total_size.fetch_add(
+                        *asset_download_size
+                            .get(index)
+                            .context(ManifestLookUpSnafu {
+                                key: "asset_download_size[index]",
+                            })?,
+                        Ordering::Relaxed,
+                    );
+                }
+                let asset_download_path = asset_download_path.clone();
+                let stuff = Box::pin(async move {
+                    if okto_download {
+                        let bytes = download_file(
+                            asset_download_list
+                                .get(index)
+                                .context(ManifestLookUpSnafu {
+                                    key: "asset_download_list[index]",
+                                })?,
+                            current_size,
+                        )
+                        .await?;
+                        fs::write(&asset_download_path, bytes)
+                            .await
+                            .context(IoSnafu {
+                                path: asset_download_path,
+                            })?;
+                    }
+                    Ok::<_, HandleError>(())
+                });
+                Ok::<_, ManifestProcessingError>(stuff)
+            })
+        })
+        .collect::<Vec<_>>();
+    for task in future::join_all(tasks).await {
+        let r = task.unwrap().unwrap();
+        handles.push(r);
     }
     Ok(())
 }

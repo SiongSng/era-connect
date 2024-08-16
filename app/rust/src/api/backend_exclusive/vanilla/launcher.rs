@@ -256,6 +256,7 @@ pub async fn prepare_vanilla_download(
 
     info!("Preping for assets download");
     let asset_settings = extract_assets(&game_manifest.asset_index, asset_directory).await?;
+    info!("Asset information grepped, now turning them into downloadable args");
     parallel_assets_download(asset_settings, &current_size, &total_size, &mut handles).await?;
 
     if let Some(advanced_option) = &collection.advanced_options() {
