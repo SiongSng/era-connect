@@ -41,3 +41,4 @@ thiserror = "1.0.63"
 ordermap = "0.5.0"
 dioxus-logger = { git = "https://github.com/DogeDark/dioxus-logger" }
 snafu = "0.8.4"
+pausable_future = "0.2.0"

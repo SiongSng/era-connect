@@ -1,6 +1,7 @@
 use std::{
     collections::VecDeque,
     convert::TryInto,
+    future::Future,
     path::Path,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -13,11 +14,12 @@ use bytes::{BufMut, Bytes, BytesMut};
 use dioxus::{dioxus_core::SpawnIfAsync, signals::Readable};
 use dioxus_logger::tracing::{debug, error};
 use futures::{future::BoxFuture, StreamExt};
+use pausable_future::Pausable;
 use reqwest::Url;
-use snafu::Whatever;
 use tokio::{
     fs::{self, File},
     io::{AsyncReadExt, BufReader},
+    sync::Semaphore,
     task,
     time::{self, Instant},
 };
@@ -47,7 +49,19 @@ impl From<LibraryError> for HandleError {
     }
 }
 
-pub type HandlesType<Out = Result<(), HandleError>> = Vec<BoxFuture<'static, Out>>;
+pub struct HandlesType<Out = Result<(), HandleError>>(pub Vec<Pausable<BoxFuture<'static, Out>>>);
+
+impl HandlesType {
+    pub fn new() -> Self {
+        Self(Vec::new())
+    }
+    pub fn push(
+        &mut self,
+        future: impl Future<Output = Result<(), HandleError>> + std::marker::Send + 'static,
+    ) {
+        self.0.push(Pausable::new(Box::pin(future)))
+    }
+}
 
 #[derive(Debug, Snafu)]
 pub enum DownloadError {
@@ -227,6 +241,7 @@ pub struct Progress {
     pub current_size: Option<f64>,
     pub total_size: Option<f64>,
     pub bias: DownloadBias,
+    pub paused: bool,
 }
 
 impl Progress {
@@ -336,6 +351,14 @@ impl Default for DownloadType {
 }
 
 impl DownloadId {
+    pub fn new(collection_id: CollectionId, download_type: impl Into<Arc<DownloadType>>) -> Self {
+        let download_type = download_type.into();
+        Self {
+            collection_id,
+            download_type,
+        }
+    }
+
     pub fn from_progress(id: CollectionId, progress: &Progress) -> DownloadId {
         DownloadId {
             collection_id: id,
@@ -356,6 +379,7 @@ impl Default for Progress {
                 start: 0.0,
                 end: 100.0,
             },
+            paused: false,
         }
     }
 }
@@ -409,8 +433,9 @@ pub async fn execute_and_progress(
                     bias,
                     calculate_speed,
                 ));
+                let download_id = DownloadId::new(id, download_type);
 
-                join_futures(handles).await.unwrap();
+                join_futures(download_id, handles).await.unwrap();
 
                 download_complete.store(true, Ordering::Release);
                 output.await.unwrap();
@@ -456,6 +481,7 @@ pub async fn rolling_average(
                 current_size: Some(0.0),
                 total_size: Some(0.0),
                 bias: DownloadBias::default(),
+                paused: false,
             };
             let download_id = DownloadId::from_progress(id.clone(), &progress);
             DOWNLOAD_PROGRESS.write().0.insert(download_id, progress);
@@ -473,7 +499,7 @@ pub async fn rolling_average(
             }
 
             let average_speed = average_speed.iter().sum::<f64>() / average_speed.len() as f64;
-            debug!("{}", average_speed);
+            debug!("speed: {}", average_speed);
 
             Progress {
                 download_type,
@@ -482,6 +508,7 @@ pub async fn rolling_average(
                 current_size: Some(current),
                 total_size: Some(total),
                 bias,
+                paused: false,
             }
         } else {
             Progress {
@@ -491,6 +518,20 @@ pub async fn rolling_average(
                 current_size: None,
                 total_size: None,
                 bias,
+                paused: false,
+            }
+        };
+
+        let download_id = DownloadId::from_progress(id.clone(), &progress);
+
+        let insert = || {
+            let mut write = DOWNLOAD_PROGRESS.write();
+            if let Some(x) = write.0.get_mut(&download_id) {
+                let paused = x.paused;
+                *x = progress;
+                x.paused = paused;
+            } else {
+                write.0.insert(download_id, progress);
             }
         };
 
@@ -498,32 +539,75 @@ pub async fn rolling_average(
             if !completed {
                 completed = true;
             } else {
-                let download_id = DownloadId::from_progress(id.clone(), &progress);
-                DOWNLOAD_PROGRESS.write().0.insert(download_id, progress);
+                insert();
                 break;
             }
         } else {
             prev_bytes = current;
             instant = Instant::now();
-            let download_id = DownloadId::from_progress(id.clone(), &progress);
-            DOWNLOAD_PROGRESS.write().0.insert(download_id, progress);
+            insert();
         }
     }
 }
 
-pub async fn join_futures(handles: HandlesType) -> Result<(), Whatever> {
+pub async fn join_futures(
+    download_id: DownloadId,
+    handles: HandlesType,
+) -> Result<(), HandleError> {
     let concurrent_limit = STORAGE
         .global_settings
         .read()
         .download
         .max_simultatneous_download;
-    let mut download_stream = tokio_stream::iter(handles)
-        .map(|x| tokio::spawn(x))
-        .buffer_unordered(concurrent_limit);
-    while let Some(x) = download_stream.next().await {
-        x.unwrap().unwrap();
-        // x.with_whatever_context(|x| whatever!("tokio spawn error: {x:?}"))?;
+    let download_stream = tokio_stream::iter(handles.0)
+        .map(|x| {
+            let controller = x.controller();
+            (x, controller)
+        })
+        .collect::<(Vec<_>, Vec<_>)>()
+        .await;
+
+    let controllers = download_stream.1;
+    let controller_future = async move {
+        loop {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let download_progress = DOWNLOAD_PROGRESS.peek();
+            let Some(progress) = download_progress.0.get(&download_id) else {
+                continue;
+            };
+            let paused = progress.paused;
+            for (i, controller) in controllers.iter().enumerate() {
+                if paused && !controller.is_paused() {
+                    controller.pause();
+                    debug!("Paused task {i}");
+                }
+                if !paused && controller.is_paused() {
+                    controller.resume();
+                    debug!("Resume task {i}");
+                }
+            }
+        }
+    };
+
+    tokio::task::spawn_local(controller_future);
+
+    let semaphore = Arc::new(Semaphore::new(concurrent_limit));
+
+    let mut v = Vec::new();
+
+    for x in download_stream.0.into_iter() {
+        let semaphore = Arc::clone(&semaphore);
+        let handle = tokio::spawn(async move {
+            let _permit = semaphore.acquire().await;
+            x.await.unwrap();
+        });
+        v.push(handle);
     }
+
+    while v.iter().any(|x| !x.is_finished()) {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
     Ok(())
 }
 

@@ -116,7 +116,7 @@ pub fn processers_process(
 
     let index = Arc::new(AtomicUsize::new(0));
     let index_cloned = Arc::clone(&index);
-    let mut handles: HandlesType = Vec::new();
+    let mut handles = HandlesType::new();
     let max = Arc::new(AtomicUsize::new(
         processors.as_ref().map_or(1, |x| x.len()) - 1,
     ));
@@ -156,7 +156,7 @@ pub fn processers_process(
             .binpatch
             .convert_maven_to_path(&libraries_folder)?;
 
-        handles.push(Box::pin(async move {
+        handles.push(async move {
             for (i, processor) in processors.into_iter().enumerate() {
                 index_cloned.store(i, Ordering::Relaxed);
                 let processor_jar = convert_maven_to_path(&processor.jar, Some(&libraries_folder))
@@ -226,7 +226,7 @@ pub fn processers_process(
                 }
             }
             Ok(())
-        }));
+        });
     }
 
     let arguments = manifest.get("arguments").context(ManifestLookUpSnafu {

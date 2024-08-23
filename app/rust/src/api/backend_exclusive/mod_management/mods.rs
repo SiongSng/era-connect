@@ -368,14 +368,14 @@ impl ModManager {
             let icon = minecraft_mod.icon_url.clone();
             let icon_path = minecraft_mod.get_icon_path();
             let current_size_clone = Arc::clone(&current_size);
-            handles.push(Box::pin(async move {
+            handles.push(async move {
                 if let (Some(icon), Some(icon_path)) = (icon, icon_path) {
                     if !icon_path.exists() {
                         save_url(icon, current_size_clone, icon_path).await?;
                     }
                 }
                 Ok(())
-            }));
+            });
             match &minecraft_mod.mod_data {
                 RawModData::Modrinth(minecraft_mod) => {
                     for file in &minecraft_mod.files {
@@ -390,11 +390,11 @@ impl ModManager {
                             save_url(url, current_size_clone, path.clone()).map_err(Into::into);
                         if !path.exists() {
                             total_size_clone.fetch_add(size, Ordering::Relaxed);
-                            handles.push(Box::pin(mod_writer));
+                            handles.push(mod_writer);
                         } else if let Err(x) = validate_sha1(&path, &hash).await {
                             warn!("Redownloading {x}");
                             total_size_clone.fetch_add(size, Ordering::Relaxed);
-                            handles.push(Box::pin(mod_writer));
+                            handles.push(mod_writer);
                         }
                     }
                 }
@@ -418,10 +418,10 @@ impl ModManager {
                         save_url(url, current_size_clone, path.clone()).map_err(Into::into);
                     if !path.exists() {
                         total_size_clone.fetch_add(size, Ordering::Relaxed);
-                        handles.push(Box::pin(mod_writer));
+                        handles.push(mod_writer);
                     } else if !hashes_validate(&path, &hashes).await {
                         total_size_clone.fetch_add(size, Ordering::Relaxed);
-                        handles.push(Box::pin(mod_writer));
+                        handles.push(mod_writer);
                     }
                 }
             }

@@ -11,7 +11,7 @@ use super::library::{os_match, parallel_library, Library};
 use super::manifest::{self, Argument, GameManifest};
 use super::rules::{ActionType, OsName};
 use crate::api::backend_exclusive::download::{
-    execute_and_progress, save_url, DownloadBias, DownloadType,
+    execute_and_progress, save_url, DownloadBias, DownloadType, HandlesType,
 };
 use crate::api::backend_exclusive::errors::ManifestProcessingError;
 use crate::api::backend_exclusive::errors::*;
@@ -215,7 +215,7 @@ pub async fn prepare_vanilla_download(
 
     jvm_flags.arguments = jvm_args_parse(&jvm_flags.arguments, &jvm_options);
 
-    let mut handles = Vec::new();
+    let mut handles = HandlesType::new();
 
     let current_size = Arc::new(AtomicUsize::new(0));
 

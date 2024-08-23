@@ -217,7 +217,7 @@ pub async fn prepare_modloader_download<'a>(
         libraries
     };
 
-    let mut handles: HandlesType = Vec::new();
+    let mut handles = HandlesType::new();
     let mut classpath = HashSet::new();
     let library_directory = &jvm_options.library_directory;
 
@@ -246,7 +246,7 @@ pub async fn prepare_modloader_download<'a>(
                 error!("{err}\n redownloading");
             }
 
-            handles.push(Box::pin(async move {
+            handles.push(async move {
                 if !path.exists() {
                     total_size_clone.fetch_add(artifact.size, Ordering::Relaxed);
                     let bytes = download_file(&url, current_size_clone).await?;
@@ -260,7 +260,7 @@ pub async fn prepare_modloader_download<'a>(
                     debug!("hash verified");
                     Ok(())
                 }
-            }));
+            });
         } else {
             let name = convert_maven_to_path(&library.name, None)
                 .context(MavenPathTranslationSnafu { str: library.name })?;
@@ -272,7 +272,7 @@ pub async fn prepare_modloader_download<'a>(
             }
 
             if !path.exists() {
-                handles.push(Box::pin(async move {
+                handles.push(async move {
                     if let Some(parent) = path.parent() {
                         fs::create_dir_all(parent)
                             .await
@@ -281,7 +281,7 @@ pub async fn prepare_modloader_download<'a>(
                         fs::write(&path, bytes).await.context(IoSnafu { path })?;
                     }
                     Ok(())
-                }));
+                });
             }
         }
     }
