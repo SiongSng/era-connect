@@ -1,3 +1,5 @@
+pub mod info;
+
 use chrono::DateTime;
 use chrono::Utc;
 use dioxus_logger::tracing::warn;
@@ -158,25 +160,6 @@ impl ModMetadata {
         self.enabled = true;
         Ok(())
     }
-
-    pub fn get_filepaths(&self) -> io::Result<Vec<PathBuf>> {
-        let mut read = std::fs::read_dir(self.base_path())?
-            .map(|x| x.map(|x| x.path()))
-            .collect::<io::Result<Vec<_>>>()?;
-        let target = match &self.mod_data {
-            RawModData::Modrinth(x) => x
-                .files
-                .iter()
-                .map(|x| self.base_path().join(&x.filename))
-                .collect(),
-            RawModData::Curseforge { data, .. } => {
-                vec![self.base_path().join(&data.file_name)]
-            }
-        };
-        read.retain(|x| target.contains(x) || target.contains(&x.with_extension("")));
-        Ok(read)
-    }
-
     pub fn base_path(&self) -> PathBuf {
         self.game_directory.join("mods")
     }
