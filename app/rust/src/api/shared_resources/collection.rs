@@ -5,7 +5,7 @@ pub use std::path::PathBuf;
 use std::{borrow::Cow, fs::create_dir_all};
 
 use chrono::{DateTime, Duration, Utc};
-use dioxus::signals::{ReadOnlySignal, Readable, Signal, Writable};
+use dioxus::signals::{Readable, Signal, Writable};
 use dioxus_logger::tracing::info;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -79,11 +79,11 @@ pub struct CollectionId(u64);
 
 impl CollectionId {
     pub fn try_get_collection(&self) -> Option<Signal<Collection>> {
-        STORAGE.collections.with(|x| x.get(self).cloned())
+        STORAGE.collections.read().get(self).copied()
     }
 
-    pub fn get_collection(&self) -> ReadOnlySignal<Collection> {
-        ReadOnlySignal::new(self.try_get_collection().unwrap())
+    pub fn get_collection(&self) -> Signal<Collection> {
+        self.try_get_collection().unwrap()
     }
 
     pub fn with_mut_collection<T>(

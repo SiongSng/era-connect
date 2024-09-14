@@ -12,7 +12,7 @@ use std::{
 
 use bytes::{BufMut, Bytes, BytesMut};
 use dioxus::{dioxus_core::SpawnIfAsync, signals::Readable};
-use dioxus_logger::tracing::{debug, error};
+use dioxus_logger::tracing::{debug, error, info};
 use futures::{future::BoxFuture, StreamExt};
 use pausable_future::Pausable;
 use reqwest::Url;
@@ -589,7 +589,7 @@ pub async fn join_futures(
         }
     };
 
-    tokio::task::spawn_local(controller_future);
+    let manager = tokio::task::spawn_local(controller_future);
 
     let semaphore = Arc::new(Semaphore::new(concurrent_limit));
 
@@ -607,6 +607,10 @@ pub async fn join_futures(
     while v.iter().any(|x| !x.is_finished()) {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+
+    manager.abort();
+
+    info!("Finished manager!");
 
     Ok(())
 }
