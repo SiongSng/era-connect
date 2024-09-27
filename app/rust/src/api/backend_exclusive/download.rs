@@ -82,8 +82,8 @@ pub enum DownloadError {
 
 pub async fn save_url(
     url: impl AsRef<str> + Send + Sync,
-    current_size: impl Into<Option<Arc<AtomicUsize>>>,
-    filename: impl AsRef<Path>,
+    current_size: impl Into<Option<Arc<AtomicUsize>>> + Send,
+    filename: impl AsRef<Path> + Send,
 ) -> Result<(), DownloadError> {
     let bytes = download_file(url, current_size).await?;
     fs::write(filename.as_ref(), &bytes)
@@ -96,7 +96,7 @@ pub async fn save_url(
 
 pub async fn download_file(
     url: impl AsRef<str> + Send + Sync,
-    current_size: impl Into<Option<Arc<AtomicUsize>>>,
+    current_size: impl Into<Option<Arc<AtomicUsize>>> + Send,
 ) -> Result<Bytes, DownloadError> {
     let current_size = current_size.into();
     let url = url.as_ref();

@@ -69,11 +69,11 @@ pub async fn minecraft_login_flow(
 }
 
 pub async fn create_collection(
-    display_name: impl Into<String>,
-    picture_path: impl Into<PathBuf>,
+    display_name: impl Into<String> + Send,
+    picture_path: impl Into<PathBuf> + Send,
     version_metadata: VersionMetadata,
-    mod_loader: impl Into<Option<ModLoader>>,
-    advanced_options: impl Into<Option<AdvancedOptions>>,
+    mod_loader: impl Into<Option<ModLoader>> + Send,
+    advanced_options: impl Into<Option<AdvancedOptions>> + Send,
 ) -> Result<Collection, CollectionError> {
     let display_name = display_name.into();
     let collection = Collection::create(
@@ -82,8 +82,7 @@ pub async fn create_collection(
         mod_loader.into(),
         picture_path,
         advanced_options.into(),
-    )
-    .await?;
+    )?;
 
     info!(
         "Successfully created collection basic file at {}",

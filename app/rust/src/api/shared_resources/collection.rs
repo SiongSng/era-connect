@@ -160,11 +160,11 @@ impl Collection {
         Ok(v)
     }
     /// Creates a collection and return a collection with its loader attached
-    pub async fn create(
+    pub fn create(
         display_name: String,
         version_metadata: VersionMetadata,
-        mod_loader: impl Into<Option<ModLoader>>,
-        picture_path: impl Into<PathBuf>,
+        mod_loader: impl Into<Option<ModLoader>> + Send,
+        picture_path: impl Into<PathBuf> + Send,
         advanced_options: Option<AdvancedOptions>,
     ) -> Result<Collection, CollectionError> {
         let now_time = Utc::now();
@@ -226,7 +226,7 @@ impl Collection {
         &mut self,
         project_ids: Vec<&str>,
         tag: Vec<Tag>,
-        mod_override: impl Into<Option<Vec<ModOverride>>>,
+        mod_override: impl Into<Option<Vec<ModOverride>>> + Send,
     ) -> Result<(), CollectionError> {
         let project = (&FERINTH)
             .get_multiple_projects(&project_ids)
