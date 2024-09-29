@@ -5,18 +5,22 @@ pub use std::path::PathBuf;
 use std::{borrow::Cow, fs::create_dir_all};
 
 use chrono::{DateTime, Duration, Utc};
-use dioxus::signals::{Readable, Signal, Writable};
+use dioxus::signals::{Readable, Signal, SyncSignal, Writable};
 use dioxus_logger::tracing::info;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use snafu::prelude::*;
+use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::task::JoinHandle;
 
 use crate::api::backend_exclusive::mod_management::mods::ModError;
 use crate::api::backend_exclusive::storage::storage_loader::StorageError;
 pub use crate::api::backend_exclusive::storage::storage_loader::StorageLoader;
 
-use crate::api::backend_exclusive::vanilla::launcher::LaunchGameError;
+use crate::api::backend_exclusive::vanilla::launcher::{
+    LaunchGameError, LoggerEvent, LoggerEventError,
+};
 use crate::api::{
     backend_exclusive::{
         download::{execute_and_progress, DownloadBias, DownloadType},
@@ -284,18 +288,24 @@ impl Collection {
     }
 
     /// SIDE-EFFECT: put `launch_args` into Struct
-    pub async fn launch_game(&mut self) -> Result<(), CollectionError> {
+    pub async fn launch_game(
+        &mut self,
+        signal: SyncSignal<LoggerEvent>,
+    ) -> Result<JoinHandle<Result<(), LoggerEventError>>, CollectionError> {
         if self.launch_args.is_none() {
             self.launch_args = Some(self.verify_and_download_game().await?);
             self.save()?;
         }
-        vanilla::launcher::launch_game(&self.launch_args.as_ref().unwrap())
+        vanilla::launcher::launch_game(&self.launch_args.as_ref().unwrap(), signal)
             .await
             .map_err(Into::into)
     }
 
-    pub async unsafe fn launch_game_unchecked(&self) -> Result<(), CollectionError> {
-        vanilla::launcher::launch_game(&self.launch_args.as_ref().unwrap_unchecked())
+    pub async unsafe fn launch_game_unchecked(
+        &self,
+        signal: SyncSignal<LoggerEvent>,
+    ) -> Result<JoinHandle<Result<(), LoggerEventError>>, CollectionError> {
+        vanilla::launcher::launch_game(&self.launch_args.as_ref().unwrap_unchecked(), signal)
             .await
             .map_err(Into::into)
     }

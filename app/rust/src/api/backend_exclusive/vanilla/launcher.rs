@@ -1,17 +1,26 @@
-use dioxus::signals::Readable;
-use dioxus_logger::tracing::{error, info};
+use dioxus::signals::{Readable, SyncSignal, Writable};
+use dioxus_logger::tracing::{error, info, warn, Level};
 use futures::TryFutureExt;
 use serde::{Deserialize, Serialize};
+use std::fmt::Display;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::str::FromStr;
 use std::sync::{atomic::AtomicUsize, atomic::Ordering, Arc};
 use tokio::fs::create_dir_all;
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::ChildStdout;
+use tokio::sync::mpsc::error::SendError;
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::task::{JoinError, JoinHandle};
+use xml::EventReader;
 
 use super::assets::{extract_assets, parallel_assets_download};
 use super::library::{os_match, parallel_library, Library};
 use super::manifest::{self, Argument, GameManifest};
 use super::rules::{ActionType, OsName};
 use crate::api::backend_exclusive::download::{
-    execute_and_progress, save_url, DownloadBias, DownloadType, HandlesType,
+    execute_and_progress, save_url, DownloadBias, DownloadType, HandleError, HandlesType,
 };
 use crate::api::backend_exclusive::errors::ManifestProcessingError;
 use crate::api::backend_exclusive::errors::*;
@@ -92,22 +101,158 @@ pub enum LaunchGameError {
     #[snafu(display("Could not read tokio spawn task"))]
     TokioSpawnTask { source: std::io::Error },
     #[snafu(transparent)]
+    JoinError { source: JoinError },
+    #[snafu(transparent)]
+    Logger { source: LoggerEventError },
+    #[snafu(transparent)]
     ManifestProcessing { source: ManifestProcessingError },
 }
 
-pub async fn launch_game(launch_args: &LaunchArgs) -> Result<(), LaunchGameError> {
+pub struct Logger {
+    pub level: Level,
+    reader: BufReader<ChildStdout>,
+}
+
+#[derive(derive_builder::Builder, Debug)]
+pub struct LoggerEvent {
+    level: Level,
+    logger: String,
+    thread: String,
+    timestamp: String,
+    #[builder(setter(into, strip_option), default)]
+    message: Option<String>,
+}
+
+impl Default for LoggerEvent {
+    fn default() -> Self {
+        Self {
+            level: Level::ERROR,
+            message: None,
+            logger: String::new(),
+            thread: String::new(),
+            timestamp: String::new(),
+        }
+    }
+}
+
+impl Display for LoggerEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "[{}/{}]: {}",
+            self.thread,
+            self.level,
+            self.message.clone().unwrap_or_default()
+        )
+    }
+}
+
+#[derive(Snafu, Debug)]
+pub enum LoggerEventError {
+    #[snafu(display("Could not fetch the next line of lines"))]
+    NextLine { source: std::io::Error },
+    #[snafu(display("xml: {xml}, why: {source}"))]
+    Builder {
+        source: LoggerEventBuilderError,
+        xml: String,
+    },
+}
+
+impl Logger {
+    #[must_use]
+    pub const fn new(reader: BufReader<ChildStdout>) -> Self {
+        Self {
+            level: Level::INFO,
+            reader,
+        }
+    }
+
+    #[must_use]
+    pub fn get_event(
+        self,
+        mut signal: SyncSignal<LoggerEvent>,
+    ) -> JoinHandle<Result<(), LoggerEventError>> {
+        let reader = self.reader;
+        let mut lines = reader.lines();
+        let mut total = String::new();
+        let mut logger_event_builder = LoggerEventBuilder::create_empty();
+        tokio::spawn(async move {
+            'top: while let Some(mut x) = lines.next_line().await.context(NextLineSnafu)? {
+                if !x.contains("log4j") {
+                    continue;
+                }
+                x = x.replace("log4j:", "");
+                total.push_str(&x);
+                let parser = EventReader::from_str(&total);
+                for x in parser {
+                    match x {
+                        Ok(xml::reader::XmlEvent::StartElement { attributes, .. }) => {
+                            for attr in &attributes {
+                                match &*attr.name.local_name {
+                                    "logger" => {
+                                        logger_event_builder.logger(attr.value.clone());
+                                    }
+                                    "timestamp" => {
+                                        logger_event_builder.timestamp(attr.value.clone());
+                                    }
+                                    "level" => {
+                                        logger_event_builder.level(
+                                            Level::from_str(&attr.value)
+                                                .expect("Invalid level value(impossible)"),
+                                        );
+                                    }
+                                    "thread" => {
+                                        logger_event_builder.thread(attr.value.clone());
+                                    }
+                                    x => {
+                                        warn!("Unhandlede Attribute! Please contact the developer {x}");
+                                    }
+                                }
+                            }
+                        }
+                        Ok(xml::reader::XmlEvent::CData(x)) => {
+                            logger_event_builder.message(x);
+                        }
+                        Ok(_) => {
+                            continue;
+                        }
+                        Err(_) => {
+                            continue 'top;
+                        }
+                    }
+                }
+                let event = logger_event_builder
+                    .build()
+                    .context(BuilderSnafu { xml: &total })?;
+                signal.set(event);
+                logger_event_builder = LoggerEventBuilder::create_empty();
+                total.clear();
+            }
+            Ok::<(), LoggerEventError>(())
+        })
+    }
+}
+
+pub async fn launch_game(
+    launch_args: &LaunchArgs,
+    signal: SyncSignal<LoggerEvent>,
+) -> Result<JoinHandle<Result<(), LoggerEventError>>, LaunchGameError> {
     let mut launch_vec = Vec::new();
     launch_vec.extend(&launch_args.jvm_args);
     launch_vec.push(&launch_args.main_class);
     launch_vec.extend(&launch_args.game_args);
-    let b = tokio::process::Command::new("java")
+    let mut child = tokio::process::Command::new("java")
         .args(launch_vec)
-        .spawn();
-    b.context(TokioSpawnTaskSnafu)?
-        .wait()
-        .await
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .context(TokioSpawnTaskSnafu)?;
-    Ok(())
+
+    let stdout = child.stdout.take().expect("stdout does not exist.");
+    let reader = BufReader::new(stdout);
+    let logger = Logger::new(reader);
+
+    Ok(logger.get_event(signal))
 }
 
 pub async fn full_vanilla_download(collection: &Collection) -> Result<LaunchArgs, LaunchGameError> {
@@ -143,6 +288,7 @@ pub struct ProcessedArguments {
     pub game_args: GameOptions,
 }
 
+#[allow(clippy::too_many_lines)]
 pub async fn prepare_vanilla_download(
     collection: &Collection,
     game_manifest: GameManifest,
@@ -261,9 +407,22 @@ pub async fn prepare_vanilla_download(
 
     if let Some(advanced_option) = &collection.advanced_options() {
         if let Some(max_memory) = advanced_option.jvm_max_memory {
-            jvm_flags.arguments.push(format!("-Xmx{max_memory}M"))
+            jvm_flags.arguments.push(format!("-Xmx{max_memory}M"));
         }
     }
+
+    info!("Setup logging");
+
+    let xml = build_log_xml(&game_directory);
+    let path = version_directory.join("log4j2.xml");
+
+    jvm_flags
+        .arguments
+        .push(format!("-Dlog4j.configurationFile={}", path.display()));
+
+    tokio::fs::write(&path, xml)
+        .await
+        .context(IoSnafu { path })?;
 
     let launch_args = LaunchArgs {
         jvm_args: jvm_flags.arguments,
@@ -286,6 +445,41 @@ pub async fn prepare_vanilla_download(
             game_args: game_options,
         },
     ))
+}
+
+fn build_log_xml(path: &Path) -> String {
+    format!(
+        r#"
+            <Configuration status="WARN">
+<Appenders>
+<Console name="SysOut" target="SYSTEM_OUT">
+<LegacyXMLLayout/>
+</Console>
+<RollingRandomAccessFile name="File" fileName="{0}/logs/latest.log" filePattern="{0}/logs/%d{{yyyy-MM-dd}}-%i.log.gz">
+<PatternLayout pattern="[%d{{HH:mm:ss}}] [%t/%level]: %msg{{nolookups}}%n"/>
+<Policies>
+<TimeBasedTriggeringPolicy/>
+<OnStartupTriggeringPolicy/>
+</Policies>
+</RollingRandomAccessFile>
+<Listener name="Tracy">
+<PatternLayout pattern="(%F:%L): %msg{{nolookups}}%n"/>
+</Listener>
+</Appenders>
+<Loggers>
+<Root level="info">
+<filters>
+<MarkerFilter marker="NETWORK_PACKETS" onMatch="DENY" onMismatch="NEUTRAL"/>
+</filters>
+<AppenderRef ref="SysOut"/>
+<AppenderRef ref="File"/>
+<AppenderRef ref="Tracy"/>
+</Root>
+</Loggers>
+</Configuration>
+        "#,
+        path.to_string_lossy()
+    )
 }
 
 #[derive(Snafu, Debug)]
