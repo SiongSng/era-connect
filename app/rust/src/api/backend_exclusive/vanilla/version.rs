@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::api::backend_exclusive::{download::download_file, errors::ManifestProcessingError};
 
@@ -74,11 +74,17 @@ impl PartialOrd for VersionMetadata {
 use crate::api::backend_exclusive::errors::*;
 use snafu::prelude::*;
 
-static TEMP: RwLock<Option<VersionsManifest>> = RwLock::const_new(None);
+static TEMP: Mutex<Option<VersionsManifest>> = const { Mutex::const_new(None) };
 
 pub async fn get_version_manifest() -> Result<VersionsManifest, ManifestProcessingError> {
-    let response = download_file(VERSION_MANIFEST_URL, None).await?;
-    let slice = serde_json::from_slice(&response).context(DesearializationSnafu)?;
-    let slice = TEMP.write().await.get_or_insert_with(|| slice).clone();
-    Ok(slice)
+    let mut tmp = TEMP.lock().await;
+    if let Some(x) = &*tmp {
+        Ok(x.clone())
+    } else {
+        let response = download_file(VERSION_MANIFEST_URL, None).await?;
+        let slice: VersionsManifest =
+            serde_json::from_slice(&response).context(DesearializationSnafu)?;
+        *tmp = Some(slice.clone());
+        Ok(slice)
+    }
 }

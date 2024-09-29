@@ -205,7 +205,9 @@ impl Logger {
                                         logger_event_builder.thread(attr.value.clone());
                                     }
                                     x => {
-                                        warn!("Unhandlede Attribute! Please contact the developer {x}");
+                                        warn!(
+                                            "Unhandled Attribute! Please contact the developer {x}"
+                                        );
                                     }
                                 }
                             }
