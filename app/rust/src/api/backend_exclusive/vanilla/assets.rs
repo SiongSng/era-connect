@@ -69,7 +69,7 @@ pub async fn extract_assets(
     for (_, val) in asset_objects {
         let size = val
             .get("size")
-            .and_then(|x| x.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .context(ManifestLookUpSnafu {
                 key: "asset_objects[_][size]",
             })? as usize;

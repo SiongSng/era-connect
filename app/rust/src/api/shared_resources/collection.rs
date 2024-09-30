@@ -11,7 +11,6 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use snafu::prelude::*;
-use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::task::JoinHandle;
 
 use crate::api::backend_exclusive::mod_management::mods::ModError;
@@ -82,10 +81,12 @@ pub struct Collection {
 pub struct CollectionId(u64);
 
 impl CollectionId {
+    #[must_use]
     pub fn try_get_collection(&self) -> Option<Signal<Collection>> {
         STORAGE.collections.read().get(self).copied()
     }
 
+    #[must_use]
     pub fn get_collection(&self) -> Signal<Collection> {
         self.try_get_collection().unwrap()
     }
@@ -120,7 +121,8 @@ impl ModController {
 }
 
 impl ModController {
-    pub fn new(loader: ModLoader, manager: ModManager) -> Self {
+    #[must_use]
+    pub const fn new(loader: ModLoader, manager: ModManager) -> Self {
         Self { loader, manager }
     }
 }
@@ -130,35 +132,40 @@ const COLLECTION_BASE: &str = "collections";
 
 /// if a method has `&mut self`, remember to call `self.save()` to actually save it!
 impl Collection {
-    pub fn display_name(&self) -> &String {
+    #[must_use]
+    pub const fn display_name(&self) -> &String {
         &self.display_name
     }
-    pub fn minecraft_version(&self) -> &VersionMetadata {
+    #[must_use]
+    pub const fn minecraft_version(&self) -> &VersionMetadata {
         &self.minecraft_version
     }
-    pub fn mod_controller(&self) -> Option<&ModController> {
+    #[must_use]
+    pub const fn mod_controller(&self) -> Option<&ModController> {
         self.mod_controller.as_ref()
     }
-    pub fn created_at(&self) -> &DateTime<Utc> {
+    #[must_use]
+    pub const fn created_at(&self) -> &DateTime<Utc> {
         &self.created_at
     }
-    pub fn updated_at(&self) -> &DateTime<Utc> {
+    #[must_use]
+    pub const fn updated_at(&self) -> &DateTime<Utc> {
         &self.updated_at
     }
-    pub fn advanced_options(&self) -> Option<&AdvancedOptions> {
+    #[must_use]
+    pub const fn advanced_options(&self) -> Option<&AdvancedOptions> {
         self.advanced_options.as_ref()
     }
+    #[must_use]
     pub fn picture_path(&self) -> &Path {
         self.picture_path.as_path()
     }
+    #[must_use]
     pub fn entry_path(&self) -> &Path {
         self.entry_path.as_path()
     }
 
-    pub fn with_mut<T>(
-        &mut self,
-        f: impl FnOnce(&mut Collection) -> T,
-    ) -> Result<T, CollectionError> {
+    pub fn with_mut<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> Result<T, CollectionError> {
         let v = f(self);
         self.save_collection_file()?;
         Ok(v)
@@ -170,10 +177,10 @@ impl Collection {
         mod_loader: impl Into<Option<ModLoader>> + Send,
         picture_path: impl Into<PathBuf> + Send,
         advanced_options: Option<AdvancedOptions>,
-    ) -> Result<Collection, CollectionError> {
+    ) -> Result<Self, CollectionError> {
         let now_time = Utc::now();
         let loader = Self::create_loader(&display_name)?;
-        let entry_path = loader.base_path.clone();
+        let entry_path = loader.base_path;
         let mod_controller = mod_loader.into().map(|loader| {
             let mod_manager = ModManager::new(
                 entry_path.join("minecraft_root"),
@@ -184,7 +191,7 @@ impl Collection {
             ModController::new(loader, mod_manager)
         });
 
-        let collection = Collection {
+        let collection = Self {
             display_name,
             minecraft_version: version_metadata,
             mod_controller,
@@ -210,16 +217,13 @@ impl Collection {
         mod_override: Option<Vec<ModOverride>>,
     ) -> Result<(), CollectionError> {
         let project_id = project_id.as_ref();
-        let project =
-            (&FERINTH)
-                .get_project(project_id)
-                .await
-                .context(ModrinthNotAProjectSnafu {
-                    id: project_id.to_string(),
-                })?;
+        let project = FERINTH
+            .get_project(project_id)
+            .await
+            .context(ModrinthNotAProjectSnafu { id: project_id })?;
         if let Some(manager) = self.mod_manager_mut() {
             manager
-                .add_project(project.into(), tag, mod_override.unwrap_or(Vec::new()))
+                .add_project(project.into(), tag, mod_override.unwrap_or_default())
                 .await?;
         }
         self.save()?;
@@ -232,17 +236,16 @@ impl Collection {
         tag: Vec<Tag>,
         mod_override: impl Into<Option<Vec<ModOverride>>> + Send,
     ) -> Result<(), CollectionError> {
-        let project = (&FERINTH)
-            .get_multiple_projects(&project_ids)
-            .await
-            .context(ModrinthNotAProjectSnafu {
+        let project = FERINTH.get_multiple_projects(&project_ids).await.context(
+            ModrinthNotAProjectSnafu {
                 id: project_ids.join(" "),
-            })?;
+            },
+        )?;
         if let Some(mod_controller) = self.mod_controller.as_mut() {
             mod_controller
                 .manager
                 .add_multiple_project(
-                    project.into_iter().map(|x| x.into()).collect::<Vec<_>>(),
+                    project.into_iter().map(Into::into).collect::<Vec<_>>(),
                     tag.clone(),
                     mod_override.into().unwrap_or(Vec::new()),
                 )
@@ -257,7 +260,7 @@ impl Collection {
         tag: Vec<Tag>,
         mod_override: Option<Vec<ModOverride>>,
     ) -> Result<(), CollectionError> {
-        let project = (&FURSE)
+        let project = FURSE
             .get_mod(project_id)
             .await
             .context(CurseForgeNotAPorjectSnafu {
@@ -265,7 +268,7 @@ impl Collection {
             })?;
         if let Some(mod_manager) = self.mod_manager_mut() {
             mod_manager
-                .add_project(project.into(), tag, mod_override.unwrap_or(Vec::new()))
+                .add_project(project.into(), tag, mod_override.unwrap_or_default())
                 .await?;
         }
         self.save()?;
@@ -296,7 +299,7 @@ impl Collection {
             self.launch_args = Some(self.verify_and_download_game().await?);
             self.save()?;
         }
-        vanilla::launcher::launch_game(&self.launch_args.as_ref().unwrap(), signal)
+        vanilla::launcher::launch_game(self.launch_args.as_ref().unwrap(), signal)
             .await
             .map_err(Into::into)
     }
@@ -305,7 +308,7 @@ impl Collection {
         &self,
         signal: SyncSignal<LoggerEvent>,
     ) -> Result<JoinHandle<Result<(), LoggerEventError>>, CollectionError> {
-        vanilla::launcher::launch_game(&self.launch_args.as_ref().unwrap_unchecked(), signal)
+        vanilla::launcher::launch_game(self.launch_args.as_ref().unwrap_unchecked(), signal)
             .await
             .map_err(Into::into)
     }
@@ -319,6 +322,7 @@ impl Collection {
         }
     }
 
+    #[must_use]
     pub fn game_directory(&self) -> PathBuf {
         self.entry_path.join("minecraft_root")
     }
@@ -327,6 +331,7 @@ impl Collection {
         DATA_DIR.join(COLLECTION_BASE)
     }
 
+    #[must_use]
     pub fn get_collection_id(&self) -> CollectionId {
         let id = self.entry_path.file_name().unwrap().to_string_lossy();
         let mut hasher = DefaultHasher::new();
@@ -336,7 +341,7 @@ impl Collection {
 
     pub fn save_collection_file(&self) -> Result<(), CollectionError> {
         StorageLoader::new(
-            COLLECTION_FILE_NAME.to_string(),
+            COLLECTION_FILE_NAME.to_owned(),
             Cow::Borrowed(&self.entry_path),
         )
         .save(&self)?;
@@ -358,9 +363,11 @@ impl Collection {
         Ok(())
     }
 
+    #[must_use]
     pub fn mod_loader(&self) -> Option<&ModLoader> {
         self.mod_controller.as_ref().map(|x| &x.loader)
     }
+    #[must_use]
     pub fn mod_manager(&self) -> Option<&ModManager> {
         self.mod_controller.as_ref().map(|x| &x.manager)
     }
@@ -383,19 +390,19 @@ impl Collection {
             .replace_all(display_name, "")
             .to_string();
         if reserved_names.contains(&dir_name.to_uppercase().as_str()) {
-            dir_name = format!("{}_", dir_name);
+            dir_name = format!("{dir_name}_");
         }
         if dir_name.is_empty() {
             dir_name = Self::gen_random_string();
         }
 
-        let entry_path = Self::handle_duplicate_dir(Collection::get_base_path(), &dir_name);
+        let entry_path = Self::handle_duplicate_dir(Self::get_base_path(), &dir_name);
         create_dir_all(&entry_path).map_err(|x| StorageError::Io {
             source: x,
             path: entry_path.clone(),
         })?;
         let loader =
-            StorageLoader::new(COLLECTION_FILE_NAME.to_string(), Cow::Borrowed(&entry_path));
+            StorageLoader::new(COLLECTION_FILE_NAME.to_owned(), Cow::Borrowed(&entry_path));
 
         Ok(loader)
     }
@@ -421,7 +428,7 @@ impl Collection {
             .collect()
     }
 
-    pub fn scan() -> Result<Vec<Collection>, CollectionError> {
+    pub fn scan() -> Result<Vec<Self>, CollectionError> {
         let mut collections = Vec::new();
         let collection_base_dir = Self::get_base_path();
         create_dir_all(&collection_base_dir).context(IoSnafu {
@@ -451,7 +458,7 @@ impl Collection {
                 if file_name == COLLECTION_FILE_NAME {
                     let path = collection_base_dir.join(&base_entry_path);
                     let loader = StorageLoader::new(file_name.clone(), Cow::Borrowed(&path));
-                    let mut collection = loader.load::<Collection>()?;
+                    let mut collection = loader.load::<Self>()?;
                     let entry_name = collection.entry_path.file_name().unwrap().to_string_lossy();
 
                     info!("Collection {entry_name} is read");

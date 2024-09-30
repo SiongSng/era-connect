@@ -35,13 +35,16 @@ pub static DOWNLOAD_PROGRESS: GlobalSignal<DownloadProgress> =
 pub struct DownloadProgress(pub BTreeMap<DownloadId, Progress>);
 
 impl DownloadProgress {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self(BTreeMap::new())
     }
 }
 
-pub fn get_skin_file_path(skin: MinecraftSkin) -> String {
-    skin.get_head_file_path().to_string_lossy().to_string()
+pub fn get_skin_file_path(skin: impl AsRef<MinecraftSkin>) -> String {
+    skin.as_ref()
+        .get_head_file_path()
+        .to_string_lossy()
+        .to_string()
 }
 
 pub async fn minecraft_login_flow(

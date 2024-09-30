@@ -51,12 +51,12 @@ pub enum Speed {
 
 impl Speed {
     // FIXME: Naive translation
+    #[must_use]
     pub fn to_mebibyte(&self) -> f64 {
         match self {
-            Speed::MegabytePerSecond(x) => *x,
-            Speed::MebibytePerSecond(x) => *x,
-            Speed::KilobytePerSecond(x) => *x / 1024.,
-            Speed::KibiBytePerSecond(x) => *x / 1000.,
+            Self::MebibytePerSecond(x) | Self::MegabytePerSecond(x) => *x,
+            Self::KilobytePerSecond(x) => *x / 1024.,
+            Self::KibiBytePerSecond(x) => *x / 1000.,
         }
     }
 }
@@ -67,7 +67,8 @@ impl Default for Speed {
     }
 }
 
-#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq, Eq)]
 pub struct Appearances {
     pub dark_lightmode: DarkLightMode,
     pub day_light_darkmode: bool,
@@ -80,14 +81,14 @@ pub struct Appearances {
     pub animation: bool,
 }
 
-#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq, Eq)]
 pub enum DarkLightMode {
     #[default]
     Dark,
     Light,
 }
 
-#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq, Eq)]
 #[serde(default)]
 pub struct UILayout {
     pub completed_setup: bool,

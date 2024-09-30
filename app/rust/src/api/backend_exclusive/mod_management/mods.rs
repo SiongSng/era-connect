@@ -15,6 +15,7 @@ use reqwest::Url;
 use serde::Deserialize;
 use serde::Serialize;
 use std::cmp::Reverse;
+use std::fmt::Display;
 use std::fs::create_dir_all;
 use std::io;
 use std::path::Path;
@@ -112,17 +113,19 @@ pub enum Platform {
 }
 
 impl ModMetadata {
+    #[must_use]
     pub fn get_icon_path(&self) -> Option<PathBuf> {
         self.icon_url.as_ref().map(|icon| {
             self.icon_directory.join(format!(
                 "{}_{}",
-                self.project_id.to_string(),
+                self.project_id,
                 extract_filename(icon.to_string()).unwrap()
             ))
         })
     }
 
-    pub fn platform(&self) -> Platform {
+    #[must_use]
+    pub const fn platform(&self) -> Platform {
         match self.mod_data {
             RawModData::Modrinth(_) => Platform::Modrinth,
             RawModData::Curseforge { .. } => Platform::Curseforge,
@@ -160,6 +163,8 @@ impl ModMetadata {
         self.enabled = true;
         Ok(())
     }
+
+    #[must_use]
     pub fn base_path(&self) -> PathBuf {
         self.game_directory.join("mods")
     }
@@ -191,15 +196,12 @@ impl ModMetadata {
         })
     }
 
-    pub async fn icon_downloaded(&self) -> Option<bool> {
-        if let Some(path) = self.get_icon_path() {
-            Some(path.exists())
-        } else {
-            None
-        }
+    #[must_use]
+    pub fn icon_downloaded(&self) -> Option<bool> {
+        self.get_icon_path().map(|path| path.exists())
     }
 
-    /// game_directory is from `collection.game_directory`
+    /// `game_directory` is from `collection.game_directory`
     pub async fn mod_is_downloaded(&self) -> bool {
         match &self.mod_data {
             RawModData::Modrinth(x) => {
@@ -227,7 +229,7 @@ impl ModMetadata {
                     let path = base_path.join(filename);
                     hashes_validate(path, &hashes).await
                 } else {
-                    // FIXME: returns true for non
+                    // FIXME: returns true for none
                     true
                 }
             }
@@ -260,12 +262,16 @@ pub enum ProjectId {
     Curseforge(i32),
 }
 
-impl ToString for ProjectId {
-    fn to_string(&self) -> String {
-        match self {
-            Self::Modrinth(x) => x.to_string(),
-            Self::Curseforge(x) => x.to_string(),
-        }
+impl Display for ProjectId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                Self::Modrinth(x) => x.to_string(),
+                Self::Curseforge(x) => x.to_string(),
+            }
+        )
     }
 }
 
@@ -284,6 +290,7 @@ pub enum Project {
     Curseforge(furse::structures::mod_structs::Mod),
 }
 
+#[allow(clippy::unsafe_derive_deserialize)]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ModManager {
     pub mods: Vec<ModMetadata>,
@@ -309,7 +316,7 @@ impl Eq for ModManager {}
 
 impl ModManager {
     #[must_use]
-    pub fn new(
+    pub const fn new(
         game_directory: PathBuf,
         icon_directory: PathBuf,
         mod_loader: ModLoader,
@@ -327,7 +334,7 @@ impl ModManager {
 
     pub async fn all_downloaded(&self) -> bool {
         tokio_stream::iter(self.mods.iter())
-            .all(|minecraft_mod| minecraft_mod.mod_is_downloaded())
+            .all(ModMetadata::mod_is_downloaded)
             .await
     }
 
@@ -342,7 +349,7 @@ impl ModManager {
             })?;
         }
         if !icon_base_path.exists() {
-            create_dir_all(&icon_base_path).context(IoSnafu {
+            create_dir_all(icon_base_path).context(IoSnafu {
                 path: icon_base_path,
             })?;
         }
@@ -399,10 +406,7 @@ impl ModManager {
                     let total_size_clone = Arc::clone(&total_size);
                     let mod_writer =
                         save_url(url, current_size_clone, path.clone()).map_err(Into::into);
-                    if !path.exists() {
-                        total_size_clone.fetch_add(size, Ordering::Relaxed);
-                        handles.push(mod_writer);
-                    } else if !hashes_validate(&path, &hashes).await {
+                    if !path.exists() || !hashes_validate(&path, &hashes).await {
                         total_size_clone.fetch_add(size, Ordering::Relaxed);
                         handles.push(mod_writer);
                     }
@@ -548,13 +552,11 @@ impl ModManager {
             self.mod_dependencies_resolve(&new.mod_data, mod_override)
                 .await?;
             if self.mod_loader.mod_loader_type == ModLoaderType::Quilt && is_fabric_api {
-                let project = (&FERINTH)
+                let project = FERINTH
                     .get_project("qsl")
                     .await
                     .map_err(Into::into)
-                    .context(ModNotExistSnafu {
-                        name: "qsl".to_string(),
-                    })?;
+                    .context(ModNotExistSnafu { name: "qsl" })?;
                 self.add_project(project.into(), vec![Tag::Dependencies], vec![])
                     .await?;
             } else {
@@ -600,13 +602,11 @@ impl ModManager {
                 self.mod_dependencies_resolve(&mod_metadata.mod_data, mod_override.clone())
                     .await?;
                 if self.mod_loader.mod_loader_type == ModLoaderType::Quilt && is_fabric_api {
-                    let project = (&FERINTH)
+                    let project = FERINTH
                         .get_project("qsl")
                         .await
                         .map_err(Into::into)
-                        .context(ModNotExistSnafu {
-                            name: "qsl".to_string(),
-                        })?;
+                        .context(ModNotExistSnafu { name: "qsl" })?;
                     self.add_project(project.into(), vec![Tag::Dependencies], vec![])
                         .await?;
                 } else {
@@ -635,7 +635,7 @@ impl ModManager {
                     .await
                     .map_err(Into::into)
                     .context(ModNotExistSnafu {
-                        name: minecraft_mod.project_id.to_string(),
+                        name: &minecraft_mod.project_id,
                     })?;
                 let memebers = FERINTH
                     .list_team_members(&project.team)
@@ -711,7 +711,7 @@ impl ModManager {
     ) -> Result<ModrinthSearchResponse, ModError> {
         let mod_loader = &self.mod_loader;
         let mod_loader_facet = Facet::Categories(mod_loader.to_string());
-        let version_facet = Facet::Versions(self.target_game_version.id.to_string());
+        let version_facet = Facet::Versions(self.target_game_version.id.clone());
         let search_hits = FERINTH
             .search(
                 query,
@@ -727,7 +727,7 @@ impl ModManager {
     async fn all_game_versions(&mut self) -> Result<&[VersionMetadata], ModError> {
         let version = get_version_manifest().await;
 
-        if let None = self.cache {
+        if self.cache.is_none() {
             self.cache = Some(version?.versions);
         }
 
@@ -771,12 +771,10 @@ impl ModManager {
         )?;
 
         self.add_mod(
-            version
-                .context(ProjectModloaderLookupSnafu {
-                    mod_loader: collection_mod_loader,
-                    project: name,
-                })?
-                .into(),
+            version.context(ProjectModloaderLookupSnafu {
+                mod_loader: collection_mod_loader,
+                project: name,
+            })?,
             tag,
             mod_override,
         )
@@ -845,6 +843,7 @@ impl ModManager {
     }
 }
 
+#[allow(clippy::too_many_lines, clippy::option_if_let_else)]
 fn fetch_version_modloader_constraints(
     name: &str,
     all_game_versions: &[VersionMetadata],
@@ -941,10 +940,11 @@ fn fetch_version_modloader_constraints(
         })
         .peekable();
     if mod_loader_filter.peek().is_none() {
-        return Err(ModError::ProjectModloaderLookup {
+        return Err(ProjectModloaderLookupSnafu {
             mod_loader: collection_mod_loader,
-            project: name.to_string(),
-        });
+            project: name,
+        }
+        .build());
     }
     let mut possible_versions = mod_loader_filter
         .filter(|x| {
@@ -1024,19 +1024,19 @@ async fn get_mod_version(project: Project) -> Result<Vec<RawModData>, ModError> 
             .await
             .map_err(Into::<FetchError>::into)?
             .into_iter()
-            .map(|x| x.into())
+            .map(Into::into)
             .collect::<Vec<_>>(),
         Project::Curseforge(x) => x
             .latest_files
             .into_iter()
             .zip(x.latest_files_indexes.into_iter())
-            .map(|x| x.into())
+            .map(Into::into)
             .collect::<Vec<_>>(),
     };
     Ok(projects)
 }
 
-fn minor_game_check(version: &&VersionMetadata, game_id: &str) -> bool {
+fn minor_game_check(version: &VersionMetadata, game_id: &str) -> bool {
     let target_semver = semver::Version::parse(game_id).map(|x| x.minor);
     if let (Ok(supported_version), Ok(target)) = (
         semver::Version::parse(&version.id).map(|x| x.minor),
@@ -1047,7 +1047,8 @@ fn minor_game_check(version: &&VersionMetadata, game_id: &str) -> bool {
         version.id == game_id
     }
 }
-async fn hashes_validate(path: impl AsRef<Path>, vec: &[String]) -> bool {
+
+async fn hashes_validate(path: impl AsRef<Path> + Send, vec: &[String]) -> bool {
     let path = path.as_ref();
     tokio_stream::iter(vec)
         .any(|x| async move { validate_sha1(path, x).await.is_ok() })

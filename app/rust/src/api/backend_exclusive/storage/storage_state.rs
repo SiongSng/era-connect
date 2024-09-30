@@ -13,7 +13,14 @@ pub struct StorageState {
     pub global_settings: GlobalSignal<GlobalSettings>,
 }
 
+impl Default for StorageState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StorageState {
+    #[must_use]
     pub const fn new() -> Self {
         let account_storage = GlobalSignal::new(|| AccountStorage::load().unwrap_or_default());
         let collections = GlobalSignal::new(|| {
@@ -27,8 +34,8 @@ impl StorageState {
 
         Self {
             account_storage,
-            global_settings,
             collections,
+            global_settings,
         }
     }
 }

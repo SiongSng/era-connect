@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::Mutex;
 
 use crate::api::backend_exclusive::{download::download_file, errors::ManifestProcessingError};
 
@@ -85,6 +85,7 @@ pub async fn get_version_manifest() -> Result<VersionsManifest, ManifestProcessi
         let slice: VersionsManifest =
             serde_json::from_slice(&response).context(DesearializationSnafu)?;
         *tmp = Some(slice.clone());
+        drop(tmp);
         Ok(slice)
     }
 }

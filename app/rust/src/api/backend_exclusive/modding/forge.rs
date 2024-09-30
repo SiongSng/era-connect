@@ -84,27 +84,28 @@ impl ProcessorsDataType {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 pub fn processers_process(
     mut launch_args: LaunchArgs,
-    jvm_options: JvmOptions,
-    manifest: Value,
+    jvm_options: &JvmOptions,
+    manifest: &Value,
 ) -> Result<(LaunchArgs, DownloadArgs), ManifestProcessingError> {
     let libraries_folder = jvm_options.library_directory.to_string_lossy().to_string();
     let library_manifest = manifest
         .get("libraries")
-        .map(|x| Vec::<ModloaderLibrary>::deserialize(x))
+        .map(Vec::<ModloaderLibrary>::deserialize)
         .context(ManifestLookUpSnafu {
             key: String::from("manifest[libraries]"),
         })?
         .context(DesearializationSnafu)?;
     let processor_data = manifest
         .get("data")
-        .map(|x| ProcessorData::deserialize(x))
+        .map(ProcessorData::deserialize)
         .transpose()
         .context(DesearializationSnafu)?;
     let processors = manifest
         .get("processors")
-        .map(|x| Vec::<Processors>::deserialize(x))
+        .map(Vec::<Processors>::deserialize)
         .transpose()
         .context(DesearializationSnafu)?;
 
@@ -118,7 +119,7 @@ pub fn processers_process(
     let index_cloned = Arc::clone(&index);
     let mut handles = HandlesType::new();
     let max = Arc::new(AtomicUsize::new(
-        processors.as_ref().map_or(1, |x| x.len()) - 1,
+        processors.as_ref().map_or(1, Vec::len) - 1,
     ));
 
     if let (Some(mut processor_data), Some(processors), Some(forge_installer)) =
@@ -169,7 +170,7 @@ pub fn processers_process(
                 let mut processor_classpath = processor
                     .classpath
                     .iter()
-                    .flat_map(|x| convert_maven_to_path(x, Some(&libraries_folder)))
+                    .filter_map(|x| convert_maven_to_path(x, Some(&libraries_folder)))
                     .collect::<Vec<_>>();
 
                 processor_classpath.push(processor_jar);
@@ -187,7 +188,7 @@ pub fn processers_process(
                     &game_directory,
                     &convert_maven_to_path(&forge_installer, Some(&libraries_folder)).context(
                         MavenPathTranslationSnafu {
-                            str: forge_installer.to_string(),
+                            str: &forge_installer,
                         },
                     )?,
                 )
@@ -234,21 +235,19 @@ pub fn processers_process(
     })?;
     let jvm = arguments
         .get("jvm")
-        .map(|x| Vec::<String>::deserialize(x))
-        .unwrap_or(Ok(vec![]))
+        .map_or(Ok(vec![]), Vec::<String>::deserialize)
         .context(DesearializationSnafu)?;
     let game = arguments
         .get("game")
-        .map(|x| Vec::<String>::deserialize(x))
-        .unwrap_or(Ok(vec![]))
+        .map_or(Ok(vec![]), Vec::<String>::deserialize)
         .context(DesearializationSnafu)?;
-    let jvm = jvm_args_parse(&jvm, &jvm_options);
-    launch_args.main_class = manifest
+    let jvm = jvm_args_parse(&jvm, jvm_options);
+    manifest
         .get("mainClass")
         .context(MainClassSnafu)?
         .as_str()
         .context(MainClassSnafu)?
-        .to_owned();
+        .clone_into(&mut launch_args.main_class);
     launch_args.jvm_args.extend(jvm);
     launch_args.game_args.extend(game);
     let download_args = DownloadArgs {
@@ -392,8 +391,9 @@ fn pre_convert_maven_to_path(input: &str, extension: Option<&str>) -> Option<Str
     Some(format!("{path}/{file_name}"))
 }
 
+#[must_use]
 pub fn convert_maven_to_path(str: &str, folder: Option<&str>) -> Option<String> {
-    let pos = str.find(|x| x == '@');
+    let pos = str.find('@');
     let mut pre_maven = pos.map_or_else(
         || pre_convert_maven_to_path(str, None),
         |position| pre_convert_maven_to_path(&str[..position], Some(&str[position + 1..])),
@@ -486,8 +486,8 @@ pub async fn fetch_launch_args_modded(
 
     let (processed_arguments, forge_processor_progress) = processers_process(
         modloader_arguments.launch_args,
-        modloader_arguments.jvm_args,
-        manifest,
+        &modloader_arguments.jvm_args,
+        &manifest,
     )?;
     execute_and_progress(
         collection_id,

@@ -38,6 +38,7 @@ pub struct LibraryArtifact {
     pub artifact: Metadata,
 }
 
+#[must_use]
 pub fn os_match(library: &Library, current_os_type: OsName) -> (bool, bool, &str) {
     let mut process_native = false;
     let mut is_native_library = false;
@@ -111,17 +112,17 @@ pub async fn parallel_library(
             let native_folder = Arc::clone(&native_folder);
             let total_size = Arc::clone(&total_size);
             let current_size = Arc::clone(&current_size);
-            let current_os = current_os_type.clone();
+            let current_os = current_os_type;
             let semaphore = semaphore.clone();
             tokio::spawn(async move {
-                let _ = semaphore.acquire();
+                let _ = semaphore.acquire().await;
                 let library_list = Arc::clone(&library_list);
                 let library = &library_list[index];
                 let path = library.downloads.artifact.path.clone();
                 let (process_native, is_native_library, library_extension) =
-                    os_match(&library, current_os);
+                    os_match(library, current_os);
                 let task = if let Some(path) = &path {
-                    let non_native_download_path = folder.join(&path);
+                    let non_native_download_path = folder.join(path);
                     let non_native_redownload = if non_native_download_path.exists() {
                         if let Err(x) = if !process_native && !is_native_library {
                             validate_sha1(
@@ -155,7 +156,7 @@ pub async fn parallel_library(
                     }
 
                     let url = library.downloads.artifact.url.clone();
-                    let library_extension = library_extension.to_string();
+                    let library_extension = library_extension.to_owned();
 
                     let handle = Box::pin(async move {
                         if !process_native && non_native_redownload {

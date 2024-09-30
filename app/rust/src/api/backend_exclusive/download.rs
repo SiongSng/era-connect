@@ -1,6 +1,5 @@
 use std::{
     collections::VecDeque,
-    convert::TryInto,
     future::Future,
     path::Path,
     sync::{
@@ -11,16 +10,20 @@ use std::{
 };
 
 use bytes::{BufMut, Bytes, BytesMut};
-use dioxus::{dioxus_core::SpawnIfAsync, signals::Readable};
+use dioxus::{
+    prelude::{spawn, ScopeId},
+    signals::Readable,
+};
 use dioxus_logger::tracing::{debug, error, info};
 use futures::{future::BoxFuture, StreamExt};
+use oauth2::url::ParseError;
 use pausable_future::Pausable;
 use reqwest::Url;
 use tokio::{
     fs::{self, File},
     io::{AsyncReadExt, BufReader},
     sync::Semaphore,
-    task,
+    task::{self, JoinError},
     time::{self, Instant},
 };
 
@@ -39,6 +42,8 @@ pub enum HandleError {
     Download { source: DownloadError },
     #[snafu(transparent)]
     ManifestProcessingError { source: ManifestProcessingError },
+    #[snafu(transparent)]
+    JoinError { source: JoinError },
 }
 
 impl From<LibraryError> for HandleError {
@@ -51,7 +56,14 @@ impl From<LibraryError> for HandleError {
 
 pub struct HandlesType<Out = Result<(), HandleError>>(pub Vec<Pausable<BoxFuture<'static, Out>>>);
 
+impl Default for HandlesType {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HandlesType {
+    #[must_use]
     pub fn new() -> Self {
         Self(Vec::new())
     }
@@ -59,7 +71,7 @@ impl HandlesType {
         &mut self,
         future: impl Future<Output = Result<(), HandleError>> + std::marker::Send + 'static,
     ) {
-        self.0.push(Pausable::new(Box::pin(future)))
+        self.0.push(Pausable::new(Box::pin(future)));
     }
 }
 
@@ -67,7 +79,7 @@ impl HandlesType {
 pub enum DownloadError {
     #[snafu(display("Internet Error, could not download {url}"))]
     Internet { source: reqwest::Error, url: String },
-    #[snafu(display("Could not read file at: {path}"))]
+    #[snafu(display("Filesystem error at: {path}"))]
     Io {
         source: std::io::Error,
         path: String,
@@ -80,6 +92,11 @@ pub enum DownloadError {
     FromHex { source: hex::FromHexError },
 }
 
+/// # Errors
+///
+/// Will return `Err` if:
+/// - Fails to write `filename`
+/// - Failure in `download_file`
 pub async fn save_url(
     url: impl AsRef<str> + Send + Sync,
     current_size: impl Into<Option<Arc<AtomicUsize>>> + Send,
@@ -94,6 +111,10 @@ pub async fn save_url(
     Ok(())
 }
 
+/// # Errors
+///
+/// Will return `Err` if:
+/// - Fails to establish internet connection
 pub async fn download_file(
     url: impl AsRef<str> + Send + Sync,
     current_size: impl Into<Option<Arc<AtomicUsize>>> + Send,
@@ -171,22 +192,33 @@ async fn chunked_download(
 #[derive(Debug, Snafu)]
 pub enum FileNameError {
     #[snafu(display("Failed to parse url: {url}"))]
-    UrlParsingIssues { url: String },
+    UrlParsingIssues { source: ParseError, url: String },
     #[snafu(display("Parsed url cannot be base"))]
     CannotBeBase,
     #[snafu(display("Filename has not been found in the URL"))]
     AbscenceFilename,
 }
 
+/// # Errors
+///
+/// This function returns `err` if:
+/// - Fails to parse url
+/// - Parsed url cannot be base.
+/// - Filename has not been found in the url.
 pub fn extract_filename(url: impl AsRef<str> + Send + Sync) -> Result<String, FileNameError> {
-    let parsed_url = Url::parse(url.as_ref()).map_err(|_| FileNameError::UrlParsingIssues {
-        url: url.as_ref().to_string(),
+    let parsed_url = Url::parse(url.as_ref()).context(UrlParsingIssuesSnafu {
+        url: url.as_ref().to_owned(),
     })?;
     let path_segments = parsed_url.path_segments().context(CannotBeBaseSnafu)?;
     let filename = path_segments.last().context(AbscenceFilenameSnafu)?;
     Ok(filename.to_owned())
 }
 
+/// # Errors
+///
+/// This function returns `err` if:
+/// - Fails to open file.
+/// - Fails to read file.
 pub async fn validate_sha1(
     file_path: impl AsRef<Path> + Send + Sync,
     sha1: &str,
@@ -207,14 +239,21 @@ pub async fn validate_sha1(
     let result = &hasher.finalize()[..];
 
     if result != hex::decode(sha1)? {
-        return Err(DownloadError::HashValidation {
+        let err = HashValidationSnafu {
             expected: hex::encode(result),
-            get: sha1.to_string(),
-        });
+            get: sha1,
+        };
+        return Err(err.build());
     }
 
     Ok(())
 }
+
+/// # Errors
+///
+/// This function returns `err` if:
+/// - Fails to open file.
+/// - Fails to read file.
 pub async fn get_hash(file_path: impl AsRef<Path> + Send + Sync) -> Result<Vec<u8>, DownloadError> {
     use sha1::{Digest, Sha1};
     let file_path = file_path.as_ref();
@@ -245,6 +284,7 @@ pub struct Progress {
 }
 
 impl Progress {
+    #[must_use]
     pub fn finished(&self) -> bool {
         self.percentages >= self.bias.end || self.current_size >= self.total_size
     }
@@ -266,7 +306,7 @@ impl Eq for DownloadId {}
 
 impl PartialOrd for DownloadId {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        self.collection_id.partial_cmp(&other.collection_id)
+        Some(self.collection_id.cmp(&other.collection_id))
     }
 }
 
@@ -302,7 +342,8 @@ impl DownloadType {
         Self::ModLoaderAssets(String::from("Mods Download"))
     }
 
-    pub fn is_download_type(&self, download_type: &DownloadType) -> bool {
+    #[must_use]
+    pub const fn is_download_type(&self, download_type: &Self) -> bool {
         match self {
             Self::VanillaAssets(..) => download_type.is_vanilla_assets(),
             Self::ModLoaderAssets(..) => download_type.is_mod_loader_assets(),
@@ -315,7 +356,7 @@ impl DownloadType {
     ///
     /// [`VanillaAssets`]: DownloadType::VanillaAssets
     #[must_use]
-    pub fn is_vanilla_assets(&self) -> bool {
+    pub const fn is_vanilla_assets(&self) -> bool {
         matches!(self, Self::VanillaAssets(..))
     }
 
@@ -323,7 +364,7 @@ impl DownloadType {
     ///
     /// [`ModLoaderAssets`]: DownloadType::ModLoaderAssets
     #[must_use]
-    pub fn is_mod_loader_assets(&self) -> bool {
+    pub const fn is_mod_loader_assets(&self) -> bool {
         matches!(self, Self::ModLoaderAssets(..))
     }
 
@@ -331,7 +372,7 @@ impl DownloadType {
     ///
     /// [`ModLoaderProcess`]: DownloadType::ModLoaderProcess
     #[must_use]
-    pub fn is_mod_loader_process(&self) -> bool {
+    pub const fn is_mod_loader_process(&self) -> bool {
         matches!(self, Self::ModLoaderProcess(..))
     }
 
@@ -339,7 +380,7 @@ impl DownloadType {
     ///
     /// [`ModsDownload`]: DownloadType::ModsDownload
     #[must_use]
-    pub fn is_mods_download(&self) -> bool {
+    pub const fn is_mods_download(&self) -> bool {
         matches!(self, Self::ModsDownload(..))
     }
 }
@@ -359,8 +400,9 @@ impl DownloadId {
         }
     }
 
-    pub fn from_progress(id: CollectionId, progress: &Progress) -> DownloadId {
-        DownloadId {
+    #[must_use]
+    pub fn from_progress(id: CollectionId, progress: &Progress) -> Self {
+        Self {
             collection_id: id,
             download_type: progress.download_type.clone(),
         }
@@ -420,7 +462,7 @@ pub async fn execute_and_progress(
     let current_size_clone = Arc::clone(&download_args.current);
     let total_size_clone = Arc::clone(&download_args.total);
 
-    let handle = || async move {
+    spawn(async move {
         let local = task::LocalSet::new();
         local
             .run_until(async move {
@@ -435,22 +477,23 @@ pub async fn execute_and_progress(
                 ));
                 let download_id = DownloadId::new(id, download_type);
 
-                join_futures(download_id, handles).await.unwrap();
+                if let Err(err) = join_futures(download_id, handles).await {
+                    ScopeId::APP.throw_error(err);
+                };
 
                 download_complete.store(true, Ordering::Release);
-                output.await.unwrap();
+                if let Err(x) = output.await {
+                    ScopeId::APP.throw_error(x);
+                }
             })
             .await;
-        ()
-    };
-
-    handle.spawn()().await;
+    });
 
     debug!("finish download request");
 }
 
 pub async fn rolling_average(
-    download_type: impl Into<Arc<DownloadType>>,
+    download_type: impl Into<Arc<DownloadType>> + Send,
     download_complete: Arc<AtomicBool>,
     current: Arc<AtomicUsize>,
     total: Arc<AtomicUsize>,
@@ -466,7 +509,7 @@ pub async fn rolling_average(
     let mut average_speed = VecDeque::with_capacity(rolling_average_window);
     let download_type = download_type.into();
     loop {
-        time::sleep(Duration::from_millis(sleep_time.try_into().unwrap())).await;
+        time::sleep(Duration::from_millis(sleep_time as u64)).await;
         let download_type = download_type.clone();
         let multiplier = bias.end - bias.start;
 
@@ -491,6 +534,7 @@ pub async fn rolling_average(
         let progress = if calculate_speed {
             let speed = (current - prev_bytes) / instant.elapsed().as_secs_f64();
 
+            #[allow(clippy::branches_sharing_code)] // easier understanding
             if average_speed.len() < rolling_average_window {
                 average_speed.push_back(speed);
             } else {
@@ -536,12 +580,11 @@ pub async fn rolling_average(
         };
 
         if download_complete.load(Ordering::Relaxed) {
-            if !completed {
-                completed = true;
-            } else {
+            if completed {
                 insert();
                 break;
             }
+            completed = true;
         } else {
             prev_bytes = current;
             instant = Instant::now();
@@ -550,6 +593,11 @@ pub async fn rolling_average(
     }
 }
 
+/// # Errors
+///
+/// Returns `err` if:
+/// - Fails to join from tokio runtime
+/// - Error happened in task(with `HandleError`)
 pub async fn join_futures(
     download_id: DownloadId,
     handles: HandlesType,
@@ -595,11 +643,11 @@ pub async fn join_futures(
 
     let mut v = Vec::new();
 
-    for x in download_stream.0.into_iter() {
+    for x in download_stream.0 {
         let semaphore = Arc::clone(&semaphore);
         let handle = tokio::spawn(async move {
             let _permit = semaphore.acquire().await;
-            x.await.unwrap();
+            x.await
         });
         v.push(handle);
     }
@@ -608,10 +656,13 @@ pub async fn join_futures(
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
+    for x in v {
+        x.await??;
+    }
+
     manager.abort();
 
     info!("Finished manager!");
-
     Ok(())
 }
 

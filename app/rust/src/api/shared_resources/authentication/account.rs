@@ -8,7 +8,7 @@ pub use uuid::Uuid;
 use crate::api::backend_exclusive::download::{download_file, DownloadError};
 use crate::api::shared_resources::entry::DATA_DIR;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MinecraftAccount {
     pub username: String,
     pub uuid: Uuid,
@@ -18,7 +18,7 @@ pub struct MinecraftAccount {
     pub capes: Vec<MinecraftCape>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MinecraftSkin {
     pub id: Uuid,
     pub state: String,
@@ -26,7 +26,7 @@ pub struct MinecraftSkin {
     pub variant: MinecraftSkinVariant,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum MinecraftSkinVariant {
     #[serde(rename = "CLASSIC")]
     Classic,
@@ -34,7 +34,7 @@ pub enum MinecraftSkinVariant {
     Slim,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MinecraftCape {
     pub id: Uuid,
     pub state: String,
@@ -42,7 +42,7 @@ pub struct MinecraftCape {
     pub alias: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AccountToken {
     pub token: String,
     pub expires_at: i64,

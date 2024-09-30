@@ -251,15 +251,13 @@ pub async fn prepare_modloader_download<'a>(
                     total_size_clone.fetch_add(artifact.size, Ordering::Relaxed);
                     let bytes = download_file(&url, current_size_clone).await?;
                     fs::write(&path, bytes).await.context(IoSnafu { path })?;
-                    Ok(())
-                } else if let Err(_) = validate_sha1(&path, &sha1).await {
+                } else if (validate_sha1(&path, &sha1).await).is_err() {
                     let bytes = download_file(&url, current_size_clone).await?;
                     fs::write(&path, bytes).await.context(IoSnafu { path })?;
-                    Ok(())
                 } else {
                     debug!("hash verified");
-                    Ok(())
                 }
+                Ok(())
             });
         } else {
             let name = convert_maven_to_path(&library.name, None)

@@ -241,15 +241,12 @@ pub async fn login_flow(
 }
 
 fn create_oauth_client() -> Result<OAuthClient, OauthErrors> {
-    let auth_url = AuthUrl::new(MSA_URL.to_owned()).context(UrlSnafu {
-        url: MSA_URL.to_string(),
-    })?;
-    let token_url = TokenUrl::new(MSA_TOKEN_URL.to_owned()).context(UrlSnafu {
-        url: MSA_TOKEN_URL.to_owned(),
-    })?;
+    let auth_url = AuthUrl::new(MSA_URL.to_owned()).context(UrlSnafu { url: MSA_URL })?;
+    let token_url =
+        TokenUrl::new(MSA_TOKEN_URL.to_owned()).context(UrlSnafu { url: MSA_TOKEN_URL })?;
     let device_authorization_url = DeviceAuthorizationUrl::new(MSA_DEVICE_CODE_URL.to_owned())
         .context(UrlSnafu {
-            url: MSA_DEVICE_CODE_URL.to_owned(),
+            url: MSA_DEVICE_CODE_URL,
         })?;
     let client = BasicClient::new(
         ClientId::new(MSA_CLIENT_ID.to_owned()),
@@ -413,7 +410,7 @@ async fn get_user_profile(mc_access_token: &str) -> Result<MinecraftUserProfile,
         .await
         .context(UrlResponseSnafu {
             url: MINECRAFT_USER_PROFILE_URL,
-            payload: mc_access_token.to_string(),
+            payload: mc_access_token,
         })?;
     let response = response
         .json::<MinecraftUserProfile>()

@@ -10,8 +10,6 @@ use std::sync::{atomic::AtomicUsize, atomic::Ordering, Arc};
 use tokio::fs::create_dir_all;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::ChildStdout;
-use tokio::sync::mpsc::error::SendError;
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::task::{JoinError, JoinHandle};
 use xml::EventReader;
 
@@ -20,7 +18,7 @@ use super::library::{os_match, parallel_library, Library};
 use super::manifest::{self, Argument, GameManifest};
 use super::rules::{ActionType, OsName};
 use crate::api::backend_exclusive::download::{
-    execute_and_progress, save_url, DownloadBias, DownloadType, HandleError, HandlesType,
+    execute_and_progress, save_url, DownloadBias, DownloadType, HandlesType,
 };
 use crate::api::backend_exclusive::errors::ManifestProcessingError;
 use crate::api::backend_exclusive::errors::*;
@@ -177,7 +175,7 @@ impl Logger {
         let mut total = String::new();
         let mut logger_event_builder = LoggerEventBuilder::create_empty();
         tokio::spawn(async move {
-            'top: while let Some(mut x) = lines.next_line().await.context(NextLineSnafu)? {
+            'outer: while let Some(mut x) = lines.next_line().await.context(NextLineSnafu)? {
                 if !x.contains("log4j") {
                     continue;
                 }
@@ -219,7 +217,7 @@ impl Logger {
                             continue;
                         }
                         Err(_) => {
-                            continue 'top;
+                            continue 'outer;
                         }
                     }
                 }
@@ -353,7 +351,7 @@ pub async fn prepare_vanilla_download(
 
     info!("Setting up jvm rules");
     let (jvm_options, mut jvm_flags) = add_jvm_rules(
-        Arc::clone(&library_list),
+        &library_list,
         &library_directory,
         &client_jar_filename,
         jvm_options,
@@ -493,7 +491,7 @@ pub enum JvmRuleError {
 }
 
 fn add_jvm_rules(
-    library_list: Arc<[Library]>,
+    library_list: &[Library],
     library_path: impl AsRef<Path>,
     client_jar: impl AsRef<Path>,
     mut jvm_options: JvmOptions,
@@ -512,7 +510,7 @@ fn add_jvm_rules(
     })?;
 
     let mut parsed_library_list = Vec::new();
-    for library in library_list.iter() {
+    for library in library_list {
         let (process_native, is_native_library, _) = os_match(library, current_os_type);
         if !process_native && !is_native_library {
             parsed_library_list.push(library);
@@ -535,7 +533,7 @@ fn add_jvm_rules(
     classpath_list.push(client_jar.as_ref().to_string_lossy().to_string());
     jvm_options.classpath = classpath_list.join(":");
     let mut new_arguments = Vec::new();
-    let current_architecture = std::env::consts::ARCH.to_string();
+    let current_architecture = std::env::consts::ARCH.to_owned();
 
     for p in jvm_flags.arguments {
         match p {
@@ -552,10 +550,10 @@ fn add_jvm_rules(
                     {
                         match value {
                             manifest::ArgumentRuledValue::Single(ref x) => {
-                                new_arguments.push(x.clone())
+                                new_arguments.push(x.clone());
                             }
                             manifest::ArgumentRuledValue::Multiple(ref x) => {
-                                new_arguments.extend_from_slice(&x)
+                                new_arguments.extend_from_slice(x);
                             }
                         }
                     }
