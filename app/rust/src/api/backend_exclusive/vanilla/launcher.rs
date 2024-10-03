@@ -1,7 +1,9 @@
 use dioxus::signals::{Readable, SyncSignal, Writable};
+use dioxus_logger::tracing::level_filters::{LevelFilter, ParseLevelFilterError};
 use dioxus_logger::tracing::{error, info, warn, Level};
 use futures::TryFutureExt;
 use serde::{Deserialize, Serialize};
+use std::convert::TryFrom;
 use std::fmt::Display;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -11,6 +13,7 @@ use tokio::fs::create_dir_all;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::ChildStdout;
 use tokio::task::{JoinError, JoinHandle};
+use xml::reader::XmlEvent;
 use xml::EventReader;
 
 use super::assets::{extract_assets, parallel_assets_download};
@@ -121,10 +124,28 @@ pub struct LoggerEvent {
     message: Option<String>,
 }
 
+impl LoggerEvent {
+    pub fn level(&self) -> &Level {
+        &self.level
+    }
+    pub fn logger(&self) -> &str {
+        &self.logger
+    }
+    pub fn thread(&self) -> &str {
+        &self.thread
+    }
+    pub fn timestamp(&self) -> &str {
+        &self.timestamp
+    }
+    pub fn message(&self) -> Option<&str> {
+        self.message.as_deref()
+    }
+}
+
 impl Default for LoggerEvent {
     fn default() -> Self {
         Self {
-            level: Level::ERROR,
+            level: Level::TRACE,
             message: None,
             logger: String::new(),
             thread: String::new(),
@@ -154,6 +175,12 @@ pub enum LoggerEventError {
         source: LoggerEventBuilderError,
         xml: String,
     },
+
+    #[snafu(display("Failed to parse log level: {level}"))]
+    InvalidLevel {
+        source: <Level as FromStr>::Err,
+        level: String,
+    },
 }
 
 impl Logger {
@@ -173,63 +200,67 @@ impl Logger {
         let reader = self.reader;
         let mut lines = reader.lines();
         let mut total = String::new();
-        let mut logger_event_builder = LoggerEventBuilder::create_empty();
         tokio::spawn(async move {
-            'outer: while let Some(mut x) = lines.next_line().await.context(NextLineSnafu)? {
+            while let Some(mut x) = lines.next_line().await.context(NextLineSnafu)? {
                 if !x.contains("log4j") {
                     continue;
                 }
                 x = x.replace("log4j:", "");
                 total.push_str(&x);
-                let parser = EventReader::from_str(&total);
-                for x in parser {
-                    match x {
-                        Ok(xml::reader::XmlEvent::StartElement { attributes, .. }) => {
-                            for attr in &attributes {
-                                match &*attr.name.local_name {
-                                    "logger" => {
-                                        logger_event_builder.logger(attr.value.clone());
-                                    }
-                                    "timestamp" => {
-                                        logger_event_builder.timestamp(attr.value.clone());
-                                    }
-                                    "level" => {
-                                        logger_event_builder.level(
-                                            Level::from_str(&attr.value)
-                                                .expect("Invalid level value(impossible)"),
-                                        );
-                                    }
-                                    "thread" => {
-                                        logger_event_builder.thread(attr.value.clone());
-                                    }
-                                    x => {
-                                        warn!(
-                                            "Unhandled Attribute! Please contact the developer {x}"
-                                        );
-                                    }
-                                }
+
+                if let Some(event) = Self::try_parse_xml(&total)? {
+                    signal.set(event);
+                    total.clear();
+                }
+            }
+            Ok(())
+        })
+    }
+
+    fn try_parse_xml(xml: &str) -> Result<Option<LoggerEvent>, LoggerEventError> {
+        let parser = EventReader::from_str(xml);
+        let mut is_complete = false;
+        let mut builder = LoggerEventBuilder::create_empty();
+
+        for event in parser {
+            match event {
+                Ok(XmlEvent::StartElement { attributes, .. }) => {
+                    for attr in &attributes {
+                        match &*attr.name.local_name {
+                            "logger" => {
+                                builder.logger(attr.value.clone());
                             }
-                        }
-                        Ok(xml::reader::XmlEvent::CData(x)) => {
-                            logger_event_builder.message(x);
-                        }
-                        Ok(_) => {
-                            continue;
-                        }
-                        Err(_) => {
-                            continue 'outer;
+                            "timestamp" => {
+                                builder.timestamp(attr.value.clone());
+                            }
+                            "level" => {
+                                let level = Level::from_str(&attr.value)
+                                    .context(InvalidLevelSnafu { level: &attr.value })?;
+                                builder.level(level);
+                            }
+                            "thread" => {
+                                builder.thread(attr.value.clone());
+                            }
+                            x => warn!("Unhandled Attribute! Please contact the developer {}", x),
                         }
                     }
                 }
-                let event = logger_event_builder
-                    .build()
-                    .context(BuilderSnafu { xml: &total })?;
-                signal.set(event);
-                logger_event_builder = LoggerEventBuilder::create_empty();
-                total.clear();
+                Ok(XmlEvent::CData(x)) => {
+                    builder.message(x);
+                }
+                Ok(XmlEvent::EndElement { .. }) => {
+                    is_complete = true;
+                }
+                Ok(_) => {}
+                Err(_) => return Ok(None), // XML is incomplete, wait for more data
             }
-            Ok::<(), LoggerEventError>(())
-        })
+        }
+
+        if is_complete {
+            Ok(Some(builder.build().context(BuilderSnafu { xml })?))
+        } else {
+            Ok(None)
+        }
     }
 }
 
