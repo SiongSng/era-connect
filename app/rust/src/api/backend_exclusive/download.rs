@@ -463,30 +463,22 @@ pub async fn execute_and_progress(
     let total_size_clone = Arc::clone(&download_args.total);
 
     spawn(async move {
-        let local = task::LocalSet::new();
-        local
-            .run_until(async move {
-                let output = tokio::task::spawn_local(rolling_average(
-                    value,
-                    download_complete_clone,
-                    current_size_clone,
-                    total_size_clone,
-                    id.clone(),
-                    bias,
-                    calculate_speed,
-                ));
-                let download_id = DownloadId::new(id, download_type);
+        let output = spawn(rolling_average(
+            value,
+            download_complete_clone,
+            current_size_clone,
+            total_size_clone,
+            id.clone(),
+            bias,
+            calculate_speed,
+        ));
+        let download_id = DownloadId::new(id, download_type);
 
-                if let Err(err) = join_futures(download_id, handles).await {
-                    ScopeId::APP.throw_error(err);
-                };
+        if let Err(err) = join_futures(download_id, handles).await {
+            ScopeId::APP.throw_error(err);
+        };
 
-                download_complete.store(true, Ordering::Release);
-                if let Err(x) = output.await {
-                    ScopeId::APP.throw_error(x);
-                }
-            })
-            .await;
+        download_complete.store(true, Ordering::Release);
     });
 
     debug!("finish download request");
@@ -637,7 +629,7 @@ pub async fn join_futures(
         }
     };
 
-    let manager = tokio::task::spawn_local(controller_future);
+    let manager = spawn(controller_future);
 
     let semaphore = Arc::new(Semaphore::new(concurrent_limit));
 
@@ -652,15 +644,11 @@ pub async fn join_futures(
         v.push(handle);
     }
 
-    while v.iter().any(|x| !x.is_finished()) {
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-
     for x in v {
         x.await??;
     }
 
-    manager.abort();
+    manager.pause();
 
     info!("Finished manager!");
     Ok(())
