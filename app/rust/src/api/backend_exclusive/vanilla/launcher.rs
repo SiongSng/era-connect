@@ -1,9 +1,7 @@
 use dioxus::signals::{Readable, SyncSignal, Writable};
-use dioxus_logger::tracing::level_filters::{LevelFilter, ParseLevelFilterError};
-use dioxus_logger::tracing::{error, info, warn, Level};
+use dioxus_logger::tracing::{error, info, Level};
 use futures::TryFutureExt;
 use serde::{Deserialize, Serialize};
-use std::convert::TryFrom;
 use std::fmt::Display;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -34,27 +32,24 @@ use crate::api::shared_resources::collection::Collection;
 use crate::api::shared_resources::entry::STORAGE;
 use snafu::prelude::*;
 
-#[derive(Debug, PartialEq, Deserialize)]
+#[derive(Debug, PartialEq)]
 struct GameFlagsProcessed {
     arguments: Vec<String>,
-    additional_arguments: Option<Vec<String>>,
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq)]
 struct JvmFlagsProcessed {
     arguments: Vec<String>,
-    additional_arguments: Option<Vec<String>>,
-}
-#[derive(Debug, PartialEq, Deserialize)]
-struct GameFlagsUnprocessed {
-    arguments: Vec<Argument>,
-    additional_arguments: Option<Vec<String>>,
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
-struct JvmFlagsUnprocessed {
+#[derive(Debug, PartialEq)]
+struct RawGameFlags {
     arguments: Vec<Argument>,
-    additional_arguments: Option<Vec<String>>,
+}
+
+#[derive(Debug, PartialEq)]
+struct RawJvmFlags {
+    arguments: Vec<Argument>,
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
@@ -176,12 +171,17 @@ pub enum LoggerEventError {
         xml: String,
     },
 
+    #[snafu(display("Unhandled XML attribute: {attribute}"))]
+    UnhandlededAttribute { attribute: String },
+
     #[snafu(display("Failed to parse log level: {level}"))]
     InvalidLevel {
         source: <Level as FromStr>::Err,
         level: String,
     },
 }
+
+struct XmlNotFinished;
 
 impl Logger {
     #[must_use]
@@ -208,7 +208,7 @@ impl Logger {
                 x = x.replace("log4j:", "");
                 total.push_str(&x);
 
-                if let Some(event) = Self::try_parse_xml(&total)? {
+                if let Ok(event) = Self::try_parse_xml(&total)? {
                     signal.set(event);
                     total.clear();
                 }
@@ -217,7 +217,7 @@ impl Logger {
         })
     }
 
-    fn try_parse_xml(xml: &str) -> Result<Option<LoggerEvent>, LoggerEventError> {
+    fn try_parse_xml(xml: &str) -> Result<Result<LoggerEvent, XmlNotFinished>, LoggerEventError> {
         let parser = EventReader::from_str(xml);
         let mut is_complete = false;
         let mut builder = LoggerEventBuilder::create_empty();
@@ -241,7 +241,9 @@ impl Logger {
                             "thread" => {
                                 builder.thread(attr.value.clone());
                             }
-                            x => warn!("Unhandled Attribute! Please contact the developer {}", x),
+                            x => {
+                                return UnhandlededAttributeSnafu { attribute: x }.fail();
+                            }
                         }
                     }
                 }
@@ -252,14 +254,14 @@ impl Logger {
                     is_complete = true;
                 }
                 Ok(_) => {}
-                Err(_) => return Ok(None), // XML is incomplete, wait for more data
+                Err(_) => return Ok(Err(XmlNotFinished)),
             }
         }
 
         if is_complete {
-            Ok(Some(builder.build().context(BuilderSnafu { xml })?))
+            builder.build().context(BuilderSnafu { xml }).map(|x| Ok(x))
         } else {
-            Ok(None)
+            Ok(Err(XmlNotFinished))
         }
     }
 }
@@ -440,6 +442,12 @@ pub async fn prepare_vanilla_download(
         if let Some(max_memory) = advanced_option.jvm_max_memory {
             jvm_flags.arguments.push(format!("-Xmx{max_memory}M"));
         }
+        jvm_flags.arguments.extend(
+            advanced_option
+                .java_arguments
+                .split(' ')
+                .map(ToOwned::to_owned),
+        );
     }
 
     info!("Setup logging");
@@ -526,7 +534,7 @@ fn add_jvm_rules(
     library_path: impl AsRef<Path>,
     client_jar: impl AsRef<Path>,
     mut jvm_options: JvmOptions,
-    jvm_flags: JvmFlagsUnprocessed,
+    jvm_flags: RawJvmFlags,
 ) -> Result<(JvmOptions, JvmFlagsProcessed), JvmRuleError> {
     let current_os =
         os_version::detect().map_err(|x| JvmRuleError::OsDetection { str: x.to_string() })?;
@@ -594,7 +602,6 @@ fn add_jvm_rules(
     }
     let jvm_flags = JvmFlagsProcessed {
         arguments: new_arguments,
-        additional_arguments: jvm_flags.additional_arguments,
     };
     Ok((jvm_options, jvm_flags))
 }
@@ -625,17 +632,15 @@ fn setup_jvm_options(
     })
 }
 
-const fn setup_jvm_flags(jvm_argument: Vec<Argument>) -> JvmFlagsUnprocessed {
-    JvmFlagsUnprocessed {
+const fn setup_jvm_flags(jvm_argument: Vec<Argument>) -> RawJvmFlags {
+    RawJvmFlags {
         arguments: jvm_argument,
-        additional_arguments: None,
     }
 }
 
-const fn setup_game_flags(game_arguments: Vec<Argument>) -> GameFlagsUnprocessed {
-    GameFlagsUnprocessed {
+const fn setup_game_flags(game_arguments: Vec<Argument>) -> RawGameFlags {
+    RawGameFlags {
         arguments: game_arguments,
-        additional_arguments: None,
     }
 }
 
@@ -655,7 +660,7 @@ async fn setup_game_option(
     game_directory: impl AsRef<Path> + Send + Sync,
     asset_directory: impl AsRef<Path> + Send + Sync,
     asset_index_id: String,
-    game_flags: GameFlagsUnprocessed,
+    game_flags: RawGameFlags,
 ) -> Result<(GameOptions, GameFlagsProcessed), GameOptionError> {
     let storage = &STORAGE.account_storage.read();
     let uuid = storage.main_account.context(NoMainAccountSnafu)?;
@@ -698,14 +703,10 @@ async fn setup_game_option(
                 // },
             })
             .collect(),
-        additional_arguments: game_flags.additional_arguments,
     };
 
     game_flags.arguments = game_args_parse(&game_flags, &game_options);
 
-    if let Some(x) = game_flags.additional_arguments.as_ref() {
-        game_flags.arguments.extend_from_slice(x);
-    }
     Ok((game_options, game_flags))
 }
 

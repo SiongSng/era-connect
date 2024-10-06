@@ -34,20 +34,49 @@ pub struct VersionMetadata {
     pub compliance_level: u32,
 }
 
+static TEMP: Mutex<Option<VersionsManifest>> = const { Mutex::const_new(None) };
+
 impl VersionMetadata {
     pub async fn from_id(id: &str) -> Result<Option<Self>, ManifestProcessingError> {
-        Ok(get_version_manifest()
+        Ok(Self::get_version_manifest()
             .await?
             .versions
             .iter()
             .find(|x| x.id == id)
             .cloned())
     }
-    pub async fn latest_release() -> Result<Option<Self>, ManifestProcessingError> {
-        Self::from_id(&get_version_manifest().await?.latest.release).await
+    pub async fn latest_release() -> Result<Self, ManifestProcessingError> {
+        let key = Self::get_version_manifest().await?.latest.release;
+        Self::from_id(&key)
+            .await?
+            .context(ManifestLookUpSnafu { key })
     }
-    pub async fn latest_snapshot() -> Result<Option<Self>, ManifestProcessingError> {
-        Self::from_id(&get_version_manifest().await?.latest.snapshot).await
+    pub async fn latest_snapshot() -> Result<Self, ManifestProcessingError> {
+        let key = Self::get_version_manifest().await?.latest.snapshot;
+        Self::from_id(&key)
+            .await?
+            .context(ManifestLookUpSnafu { key })
+    }
+
+    pub fn is_release(&self) -> bool {
+        matches!(self.version_type, VersionType::Release)
+    }
+
+    pub fn is_snapshot(&self) -> bool {
+        matches!(self.version_type, VersionType::Snapshot)
+    }
+
+    pub async fn get_version_manifest() -> Result<VersionsManifest, ManifestProcessingError> {
+        let mut tmp = TEMP.lock().await;
+        if let Some(x) = tmp.as_ref() {
+            Ok(x.clone())
+        } else {
+            let response = download_file(VERSION_MANIFEST_URL, None).await?;
+            let slice: VersionsManifest =
+                serde_json::from_slice(&response).context(DesearializationSnafu)?;
+            *tmp = Some(slice);
+            Ok(tmp.clone().unwrap())
+        }
     }
 }
 
@@ -73,19 +102,3 @@ impl PartialOrd for VersionMetadata {
 
 use crate::api::backend_exclusive::errors::*;
 use snafu::prelude::*;
-
-static TEMP: Mutex<Option<VersionsManifest>> = const { Mutex::const_new(None) };
-
-pub async fn get_version_manifest() -> Result<VersionsManifest, ManifestProcessingError> {
-    let mut tmp = TEMP.lock().await;
-    if let Some(x) = &*tmp {
-        Ok(x.clone())
-    } else {
-        let response = download_file(VERSION_MANIFEST_URL, None).await?;
-        let slice: VersionsManifest =
-            serde_json::from_slice(&response).context(DesearializationSnafu)?;
-        *tmp = Some(slice.clone());
-        drop(tmp);
-        Ok(slice)
-    }
-}

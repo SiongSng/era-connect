@@ -1,7 +1,7 @@
 use std::{
     collections::VecDeque,
     future::Future,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
@@ -23,7 +23,7 @@ use tokio::{
     fs::{self, File},
     io::{AsyncReadExt, BufReader},
     sync::Semaphore,
-    task::{self, JoinError},
+    task::JoinError,
     time::{self, Instant},
 };
 
@@ -38,7 +38,7 @@ use super::{errors::ManifestProcessingError, vanilla::library::LibraryError};
 
 #[derive(Debug, Snafu)]
 pub enum HandleError {
-    #[snafu(context(false), display("Downloading not success"))]
+    #[snafu(context(false), display("Failed to download {source}"))]
     Download { source: DownloadError },
     #[snafu(transparent)]
     ManifestProcessingError { source: ManifestProcessingError },
@@ -67,10 +67,7 @@ impl HandlesType {
     pub fn new() -> Self {
         Self(Vec::new())
     }
-    pub fn push(
-        &mut self,
-        future: impl Future<Output = Result<(), HandleError>> + std::marker::Send + 'static,
-    ) {
+    pub fn push(&mut self, future: impl Future<Output = Result<(), HandleError>> + Send + 'static) {
         self.0.push(Pausable::new(Box::pin(future)));
     }
 }
@@ -79,10 +76,10 @@ impl HandlesType {
 pub enum DownloadError {
     #[snafu(display("Internet Error, could not download {url}"))]
     Internet { source: reqwest::Error, url: String },
-    #[snafu(display("Filesystem error at: {path}"))]
+    #[snafu(display("Filesystem error at: {}", path.display()))]
     Io {
         source: std::io::Error,
-        path: String,
+        path: PathBuf,
     },
     #[snafu(display("Url parse error, {url}"))]
     Parse { url: String },
@@ -103,12 +100,9 @@ pub async fn save_url(
     filename: impl AsRef<Path> + Send,
 ) -> Result<(), DownloadError> {
     let bytes = download_file(url, current_size).await?;
-    fs::write(filename.as_ref(), &bytes)
-        .await
-        .context(IoSnafu {
-            path: filename.as_ref().to_string_lossy().to_string(),
-        })?;
-    Ok(())
+    fs::write(filename.as_ref(), &bytes).await.context(IoSnafu {
+        path: filename.as_ref(),
+    })
 }
 
 /// # Errors
@@ -193,10 +187,10 @@ async fn chunked_download(
 pub enum FileNameError {
     #[snafu(display("Failed to parse url: {url}"))]
     UrlParsingIssues { source: ParseError, url: String },
-    #[snafu(display("Parsed url cannot be base"))]
-    CannotBeBase,
-    #[snafu(display("Filename has not been found in the URL"))]
-    AbscenceFilename,
+    #[snafu(display("Parsed url cannot be base: {url}"))]
+    CannotBeBase { url: String },
+    #[snafu(display("Filename has not been found in the URL: {url}"))]
+    AbscenceFilename { url: String },
 }
 
 /// # Errors
@@ -206,11 +200,14 @@ pub enum FileNameError {
 /// - Parsed url cannot be base.
 /// - Filename has not been found in the url.
 pub fn extract_filename(url: impl AsRef<str> + Send + Sync) -> Result<String, FileNameError> {
-    let parsed_url = Url::parse(url.as_ref()).context(UrlParsingIssuesSnafu {
-        url: url.as_ref().to_owned(),
-    })?;
-    let path_segments = parsed_url.path_segments().context(CannotBeBaseSnafu)?;
-    let filename = path_segments.last().context(AbscenceFilenameSnafu)?;
+    let url = url.as_ref();
+    let parsed_url = Url::parse(url).context(UrlParsingIssuesSnafu { url })?;
+    let path_segments = parsed_url
+        .path_segments()
+        .context(CannotBeBaseSnafu { url })?;
+    let filename = path_segments
+        .last()
+        .context(AbscenceFilenameSnafu { url })?;
     Ok(filename.to_owned())
 }
 
@@ -225,14 +222,15 @@ pub async fn validate_sha1(
 ) -> Result<(), DownloadError> {
     use sha1::{Digest, Sha1};
     let file_path = file_path.as_ref();
-    let file = File::open(file_path).await.context(IoSnafu {
-        path: file_path.to_string_lossy().to_string(),
-    })?;
+    let file = File::open(file_path)
+        .await
+        .context(IoSnafu { path: file_path })?;
     let mut buffer = Vec::new();
     let mut reader = BufReader::new(file);
-    reader.read_to_end(&mut buffer).await.context(IoSnafu {
-        path: file_path.to_string_lossy().to_string(),
-    })?;
+    reader
+        .read_to_end(&mut buffer)
+        .await
+        .context(IoSnafu { path: file_path })?;
 
     let mut hasher = Sha1::new();
     hasher.update(&buffer);
@@ -256,15 +254,14 @@ pub async fn validate_sha1(
 /// - Fails to read file.
 pub async fn get_hash(file_path: impl AsRef<Path> + Send + Sync) -> Result<Vec<u8>, DownloadError> {
     use sha1::{Digest, Sha1};
-    let file_path = file_path.as_ref();
-    let file = File::open(file_path).await.context(IoSnafu {
-        path: file_path.to_string_lossy().to_string(),
-    })?;
+    let path = file_path.as_ref();
+    let file = File::open(path).await.context(IoSnafu { path })?;
     let mut buffer = Vec::new();
     let mut reader = BufReader::new(file);
-    reader.read_to_end(&mut buffer).await.context(IoSnafu {
-        path: file_path.to_string_lossy().to_string(),
-    })?;
+    reader
+        .read_to_end(&mut buffer)
+        .await
+        .context(IoSnafu { path })?;
     let mut hasher = Sha1::new();
     hasher.update(&buffer);
     let mut vec = Vec::new();
@@ -463,7 +460,7 @@ pub async fn execute_and_progress(
     let total_size_clone = Arc::clone(&download_args.total);
 
     spawn(async move {
-        let output = spawn(rolling_average(
+        spawn(rolling_average(
             value,
             download_complete_clone,
             current_size_clone,

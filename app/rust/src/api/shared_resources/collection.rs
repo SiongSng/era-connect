@@ -45,15 +45,25 @@ pub enum CollectionError {
     },
 
     #[snafu(transparent)]
-    ModError { source: ModError },
+    ModError {
+        source: ModError,
+    },
     #[snafu(display("Project {id} cannot be found on Modrinth"))]
-    ModrinthNotAProject { id: String, source: ferinth::Error },
+    ModrinthNotAProject {
+        id: String,
+        source: ferinth::Error,
+    },
     #[snafu(display("Project {id} cannot be found on Curseforge"))]
-    CurseForgeNotAPorject { id: String, source: furse::Error },
-    #[snafu(transparent)]
-    StorageError { source: StorageError },
-    #[snafu(transparent)]
-    LaunchGameError { source: LaunchGameError },
+    CurseForgeNotAPorject {
+        id: String,
+        source: furse::Error,
+    },
+    StorageError {
+        source: StorageError,
+    },
+    LaunchGameError {
+        source: LaunchGameError,
+    },
 }
 
 use super::entry::STORAGE;
@@ -100,7 +110,7 @@ impl CollectionId {
             .with_mut(|x| x.get_mut(self).unwrap().with_mut(|x| x.with_mut(f)))
     }
 
-    // Usage typically paired with use_coroutine, prevent crossing async boundries
+    // Usage for preventing crossing async boundries
     pub fn replace(&self, collection: Collection) -> Result<(), CollectionError> {
         self.with_mut_collection(|x| {
             *x = collection;
@@ -179,7 +189,7 @@ impl Collection {
         advanced_options: Option<AdvancedOptions>,
     ) -> Result<Self, CollectionError> {
         let now_time = Utc::now();
-        let loader = Self::create_loader(&display_name)?;
+        let loader = Self::create_loader(&display_name).context(StorageSnafu)?;
         let entry_path = loader.base_path;
         let mod_controller = mod_loader.into().map(|loader| {
             let mod_manager = ModManager::new(
@@ -301,7 +311,7 @@ impl Collection {
         }
         vanilla::launcher::launch_game(self.launch_args.as_ref().unwrap(), signal)
             .await
-            .map_err(Into::into)
+            .context(LaunchGameSnafu)
     }
 
     pub async unsafe fn launch_game_unchecked(
@@ -310,15 +320,17 @@ impl Collection {
     ) -> Result<JoinHandle<Result<(), LoggerEventError>>, CollectionError> {
         vanilla::launcher::launch_game(self.launch_args.as_ref().unwrap_unchecked(), signal)
             .await
-            .map_err(Into::into)
+            .context(LaunchGameSnafu)
     }
 
     /// Downloads game(also verifies)
     pub async fn verify_and_download_game(&self) -> Result<LaunchArgs, CollectionError> {
         if self.mod_loader().is_some() {
-            fetch_launch_args_modded(self).await.map_err(Into::into)
+            fetch_launch_args_modded(self)
+                .await
+                .context(LaunchGameSnafu)
         } else {
-            full_vanilla_download(self).await.map_err(Into::into)
+            full_vanilla_download(self).await.context(LaunchGameSnafu)
         }
     }
 
@@ -344,7 +356,8 @@ impl Collection {
             COLLECTION_FILE_NAME.to_owned(),
             Cow::Borrowed(&self.entry_path),
         )
-        .save(&self)?;
+        .save(&self)
+        .context(StorageSnafu)?;
         Ok(())
     }
 
@@ -458,13 +471,13 @@ impl Collection {
                 if file_name == COLLECTION_FILE_NAME {
                     let path = collection_base_dir.join(&base_entry_path);
                     let loader = StorageLoader::new(file_name.clone(), Cow::Borrowed(&path));
-                    let mut collection = loader.load::<Self>()?;
+                    let mut collection = loader.load::<Self>().context(StorageSnafu)?;
                     let entry_name = collection.entry_path.file_name().unwrap().to_string_lossy();
 
                     info!("Collection {entry_name} is read");
                     if collection.entry_path != path {
                         collection.entry_path = path;
-                        loader.save(&collection)?;
+                        loader.save(&collection).context(StorageSnafu)?;
                     }
                     collections.push(collection);
                 }
@@ -507,4 +520,5 @@ pub enum ModLoaderType {
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 pub struct AdvancedOptions {
     pub jvm_max_memory: Option<usize>,
+    pub java_arguments: String,
 }

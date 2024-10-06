@@ -3,6 +3,7 @@ pub mod info;
 use chrono::DateTime;
 use chrono::Utc;
 use dioxus_logger::tracing::warn;
+use ferinth::structures::project::ProjectSupportRange;
 use ferinth::structures::search::Facet;
 use ferinth::structures::search::Sort;
 use ferinth::structures::version::DependencyType;
@@ -32,7 +33,6 @@ use crate::api::backend_exclusive::download::extract_filename;
 use crate::api::backend_exclusive::download::save_url;
 use crate::api::backend_exclusive::download::DownloadError;
 use crate::api::backend_exclusive::errors::ManifestProcessingError;
-use crate::api::backend_exclusive::vanilla::version::get_version_manifest;
 use crate::api::backend_exclusive::vanilla::version::VersionMetadata;
 use crate::api::shared_resources::collection::ModLoader;
 use crate::api::{
@@ -85,6 +85,13 @@ pub enum FetchError {
     Furse { source: furse::Error },
 }
 
+#[derive(Copy, Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub enum SupportedSide {
+    Client,
+    Server,
+    Unknown,
+}
+
 pub type ModrinthSearchResponse = ferinth::structures::search::Response;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -101,8 +108,9 @@ pub struct ModMetadata {
     pub incompatiable_mods: Option<Vec<ModMetadata>>,
     pub icon_url: Option<Url>,
     pub last_updated: DateTime<Utc>,
+    pub supported_sides: Option<Vec<SupportedSide>>,
     // pub project: Project,
-    icon_directory: PathBuf,
+    base_icon_directory: PathBuf,
     game_directory: PathBuf,
     mod_data: RawModData,
 }
@@ -116,7 +124,7 @@ impl ModMetadata {
     #[must_use]
     pub fn get_icon_path(&self) -> Option<PathBuf> {
         self.icon_url.as_ref().map(|icon| {
-            self.icon_directory.join(format!(
+            self.base_icon_directory.join(format!(
                 "{}_{}",
                 self.project_id,
                 extract_filename(icon.to_string()).unwrap()
@@ -462,7 +470,16 @@ impl ModManager {
                     .await
                     .map_err(Into::into)
                     .context(HashScanFailrueSnafu { name: path_name })?;
-                self.add_mod(version.into(), vec![Tag::Explicit], Vec::new())
+                let project = Project::Modrinth(
+                    FERINTH
+                        .get_project(&version.project_id)
+                        .await
+                        .map_err(Into::into)
+                        .context(ModNotExistSnafu {
+                            name: &version.name,
+                        })?,
+                );
+                self.add_mod(version.into(), vec![Tag::Explicit], Vec::new(), &project)
                     .await?;
             }
         }
@@ -475,6 +492,7 @@ impl ModManager {
         &mut self,
         minecraft_mod: &RawModData,
         mod_override: Vec<ModOverride>,
+        project: &Project,
     ) -> Result<(), ModError> {
         match minecraft_mod {
             RawModData::Modrinth(minecraft_mod) => {
@@ -486,20 +504,21 @@ impl ModManager {
                                 .get_version(dependency)
                                 .await
                                 .map_err(Into::into)
-                                .context(ModNotExistSnafu {
-                                    name: dependency.clone(),
-                                })?;
-                            self.add_mod(ver.into(), vec![Tag::Dependencies], mod_override)
-                                .await?;
+                                .context(ModNotExistSnafu { name: dependency })?;
+                            self.add_mod(
+                                ver.into(),
+                                vec![Tag::Dependencies],
+                                mod_override,
+                                project,
+                            )
+                            .await?;
                         } else if let Some(project) = &dept.project_id {
-                            let ver = FERINTH
+                            let project = FERINTH
                                 .get_project(project)
                                 .await
                                 .map_err(Into::into)
-                                .context(ModNotExistSnafu {
-                                    name: project.clone(),
-                                })?;
-                            self.add_project(ver.into(), vec![Tag::Dependencies], mod_override)
+                                .context(ModNotExistSnafu { name: project })?;
+                            self.add_project(project.into(), vec![Tag::Dependencies], mod_override)
                                 .await?;
                         }
                     }
@@ -534,6 +553,7 @@ impl ModManager {
         minecraft_mod_data: RawModData,
         tag: Vec<Tag>,
         mod_override: Vec<ModOverride>,
+        project: &Project,
     ) -> Result<(), ModError> {
         let (new, is_fabric_api) = Self::raw_mod_transformation(
             self.icon_directory.clone(),
@@ -541,6 +561,7 @@ impl ModManager {
             minecraft_mod_data,
             mod_override.clone(),
             tag,
+            project,
         )
         .await?;
 
@@ -549,7 +570,7 @@ impl ModManager {
                 *previous = new;
             }
         } else {
-            self.mod_dependencies_resolve(&new.mod_data, mod_override)
+            self.mod_dependencies_resolve(&new.mod_data, mod_override, project)
                 .await?;
             if self.mod_loader.mod_loader_type == ModLoaderType::Quilt && is_fabric_api {
                 let project = FERINTH
@@ -571,9 +592,10 @@ impl ModManager {
         minecraft_mod_data: Vec<RawModData>,
         tag: Vec<Tag>,
         mod_override: Vec<ModOverride>,
+        projects: Vec<Project>,
     ) -> Result<(), ModError> {
-        let buffered = tokio_stream::iter(minecraft_mod_data.into_iter())
-            .map(|mod_metadata| {
+        let buffered = tokio_stream::iter(minecraft_mod_data.into_iter().zip(projects.into_iter()))
+            .map(|(mod_metadata, project)| {
                 let mod_override_cloned = mod_override.clone();
                 let icon_directory_cloned = self.icon_directory.clone();
                 let game_directory_cloned = self.game_directory.clone();
@@ -585,9 +607,10 @@ impl ModManager {
                         mod_metadata,
                         mod_override_cloned,
                         tag_cloned,
+                        &project,
                     )
                     .await?;
-                    Ok((mod_metadata, is_fabric_api))
+                    Ok((mod_metadata, project, is_fabric_api))
                 })
             })
             .buffered(10)
@@ -597,10 +620,14 @@ impl ModManager {
             .into_iter()
             .flatten()
             .collect::<Result<Vec<_>, ModError>>()?;
-        for (mod_metadata, is_fabric_api) in minecraft_mod_data {
+        for (mod_metadata, project, is_fabric_api) in minecraft_mod_data {
             if !self.mods.contains(&mod_metadata) {
-                self.mod_dependencies_resolve(&mod_metadata.mod_data, mod_override.clone())
-                    .await?;
+                self.mod_dependencies_resolve(
+                    &mod_metadata.mod_data,
+                    mod_override.clone(),
+                    &project,
+                )
+                .await?;
                 if self.mod_loader.mod_loader_type == ModLoaderType::Quilt && is_fabric_api {
                     let project = FERINTH
                         .get_project("qsl")
@@ -623,6 +650,7 @@ impl ModManager {
         minecraft_mod_data: RawModData,
         mod_override: Vec<ModOverride>,
         tag: Vec<Tag>,
+        project: &Project,
     ) -> Result<(ModMetadata, bool), ModError> {
         let mut is_fabric_api = false;
         let mod_metadata = match &minecraft_mod_data {
@@ -630,18 +658,28 @@ impl ModManager {
                 if minecraft_mod.project_id == "P7dR8mSH" {
                     is_fabric_api = true;
                 }
-                let project = FERINTH
-                    .get_project(&minecraft_mod.project_id)
-                    .await
-                    .map_err(Into::into)
-                    .context(ModNotExistSnafu {
-                        name: &minecraft_mod.project_id,
-                    })?;
+                let Project::Modrinth(project) = &project else {
+                    panic!("somehow project mismatch.");
+                };
                 let memebers = FERINTH
                     .list_team_members(&project.team)
                     .await
                     .map_err(Into::<FetchError>::into)?;
                 let authors = memebers.into_iter().map(|x| x.user.username).collect();
+                let client_side_support = match project.client_side {
+                    ProjectSupportRange::Required | ProjectSupportRange::Optional => true,
+                    ProjectSupportRange::Unsupported | ProjectSupportRange::Unknown => false,
+                };
+                let server_side_support = match project.server_side {
+                    ProjectSupportRange::Required | ProjectSupportRange::Optional => true,
+                    ProjectSupportRange::Unsupported | ProjectSupportRange::Unknown => false,
+                };
+                let supported_sides = match (client_side_support, server_side_support) {
+                    (true, true) => vec![SupportedSide::Client, SupportedSide::Server],
+                    (true, false) => vec![SupportedSide::Client],
+                    (false, true) => vec![SupportedSide::Server],
+                    (false, false) => vec![SupportedSide::Unknown],
+                };
                 ModMetadata {
                     name: project.title.clone(),
                     project_id: ProjectId::Modrinth(minecraft_mod.project_id.clone()),
@@ -653,7 +691,8 @@ impl ModManager {
                     overrides: mod_override,
                     mod_data: minecraft_mod_data,
                     icon_url: project.icon_url.clone(),
-                    icon_directory,
+                    supported_sides: Some(supported_sides),
+                    base_icon_directory: icon_directory,
                     last_updated: project.updated,
                     authors,
                     enabled: true,
@@ -665,20 +704,16 @@ impl ModManager {
                 data: minecraft_mod,
                 ..
             } => {
-                let project = FURSE
-                    .get_mod(minecraft_mod.mod_id)
-                    .await
-                    .map_err(Into::into)
-                    .context(ModNotExistSnafu {
-                        name: minecraft_mod.mod_id.to_string(),
-                    })?;
+                let Project::Curseforge(project) = &project else {
+                    panic!("somehow project mismatch.");
+                };
                 let icon_url = project
                     .logo
                     .clone()
                     .map(|x| Url::parse(&x.thumbnail_url))
                     .transpose()
                     .expect("not valid url");
-                let authors = project.authors.into_iter().map(|x| x.name).collect();
+                let authors = project.authors.iter().map(|x| x.name.clone()).collect();
                 ModMetadata {
                     name: project.name.clone(),
                     project_id: ProjectId::Curseforge(minecraft_mod.mod_id),
@@ -690,10 +725,11 @@ impl ModManager {
                     mod_version: None,
                     tag,
                     incompatiable_mods: None,
+                    supported_sides: None,
                     overrides: mod_override,
                     mod_data: minecraft_mod_data,
                     icon_url,
-                    icon_directory,
+                    base_icon_directory: icon_directory,
                     last_updated: project.date_modified,
                     authors,
                     enabled: true,
@@ -725,7 +761,7 @@ impl ModManager {
     }
 
     async fn all_game_versions(&mut self) -> Result<&[VersionMetadata], ModError> {
-        let version = get_version_manifest().await;
+        let version = VersionMetadata::get_version_manifest().await;
 
         if self.cache.is_none() {
             self.cache = Some(version?.versions);
@@ -759,7 +795,7 @@ impl ModManager {
             Project::Curseforge(x) => x.name.clone(),
         };
 
-        let versions = get_mod_version(project).await?;
+        let versions = get_mod_version(&project).await?;
 
         let version = fetch_version_modloader_constraints(
             &name,
@@ -777,6 +813,7 @@ impl ModManager {
             })?,
             tag,
             mod_override,
+            &project,
         )
         .await?;
 
@@ -793,13 +830,13 @@ impl ModManager {
         let collection_mod_loader = self.mod_loader.mod_loader_type;
         let all_game_versions = self.all_game_versions().await?;
 
-        let buffered_iterator = tokio_stream::iter(projects.into_iter().map(|project| {
-            tokio::spawn(async {
+        let buffered_iterator = tokio_stream::iter(projects.clone().into_iter().map(|project| {
+            tokio::spawn(async move {
                 let name = match &project {
                     Project::Modrinth(x) => x.title.clone(),
                     Project::Curseforge(x) => x.name.clone(),
                 };
-                let version = get_mod_version(project).await;
+                let version = get_mod_version(&project).await;
                 match version {
                     Ok(v) => Ok((name, v)),
                     Err(err) => Err(err),
@@ -836,7 +873,7 @@ impl ModManager {
             .into_iter()
             .collect::<Result<Vec<_>, ModError>>()?;
 
-        self.add_multiple_mods(multiple_mods, tag, mod_override)
+        self.add_multiple_mods(multiple_mods, tag, mod_override, projects)
             .await?;
 
         Ok(())
@@ -1010,8 +1047,8 @@ fn fetch_version_modloader_constraints(
     Ok(version)
 }
 
-async fn get_mod_version(project: Project) -> Result<Vec<RawModData>, ModError> {
-    let projects = match project {
+async fn get_mod_version(project: &Project) -> Result<Vec<RawModData>, ModError> {
+    let versions = match project {
         Project::Modrinth(project) => FERINTH
             .get_multiple_versions(
                 project
@@ -1028,12 +1065,13 @@ async fn get_mod_version(project: Project) -> Result<Vec<RawModData>, ModError> 
             .collect::<Vec<_>>(),
         Project::Curseforge(x) => x
             .latest_files
-            .into_iter()
-            .zip(x.latest_files_indexes.into_iter())
+            .iter()
+            .cloned()
+            .zip(x.latest_files_indexes.iter().cloned())
             .map(Into::into)
             .collect::<Vec<_>>(),
     };
-    Ok(projects)
+    Ok(versions)
 }
 
 fn minor_game_check(version: &VersionMetadata, game_id: &str) -> bool {
