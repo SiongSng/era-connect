@@ -85,7 +85,7 @@ pub struct GameOptions {
     pub version_type: String,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Hash)]
 pub struct LaunchArgs {
     pub jvm_args: Vec<String>,
     pub main_class: String,

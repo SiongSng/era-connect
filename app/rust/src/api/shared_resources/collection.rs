@@ -5,8 +5,12 @@ pub use std::path::PathBuf;
 use std::{borrow::Cow, fs::create_dir_all};
 
 use chrono::{DateTime, Duration, Utc};
-use dioxus::signals::{Readable, Signal, SyncSignal, Writable};
-use dioxus_logger::tracing::info;
+use dioxus::signals::{
+    AnyStorage, ReadOnlySignal, Readable, ReadableRef, Signal, SyncSignal, UnsyncStorage, Writable,
+};
+use dioxus_logger::tracing::{info, warn};
+use dioxus_radio::hooks::{use_radio, Radio, RadioChannel};
+use ordermap::OrderMap;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -66,10 +70,8 @@ pub enum CollectionError {
     },
 }
 
-use super::entry::STORAGE;
-
 #[serde_with::serde_as]
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Hash)]
 pub struct Collection {
     pub display_name: String,
     pub minecraft_version: VersionMetadata,
@@ -85,40 +87,84 @@ pub struct Collection {
     launch_args: Option<LaunchArgs>,
 }
 
-#[derive(
-    Debug, Deserialize, Serialize, Clone, Eq, PartialEq, Hash, PartialOrd, Ord, derive_more::Display,
-)]
-pub struct CollectionId(u64);
+#[derive(Default, Clone)]
+pub struct Collections(pub OrderMap<CollectionId, Collection>);
 
-impl CollectionId {
-    #[must_use]
-    pub fn try_get_collection(&self) -> Option<Signal<Collection>> {
-        STORAGE.collections.read().get(self).copied()
+// Channels used to identify the subscribers of the State
+#[derive(PartialEq, Eq, Clone, Debug)]
+pub enum FetchCollectionChannel {
+    CollectionCreated,
+    WithId(CollectionId),
+}
+
+#[derive(Clone, Copy)]
+pub struct CollectionRadio {
+    id: CollectionId,
+    radio: Radio<Collections, FetchCollectionChannel>,
+}
+
+impl CollectionRadio {
+    pub fn read(&self) -> ReadableRef<Signal<Collection>> {
+        <UnsyncStorage as AnyStorage>::try_map(self.radio.read(), |x| x.0.get(&self.id)).unwrap()
+    }
+    pub fn read_owned(&self) -> Collection {
+        self.radio.read().0.get(&self.id).unwrap().clone()
     }
 
-    #[must_use]
-    pub fn get_collection(&self) -> Signal<Collection> {
-        self.try_get_collection().unwrap()
-    }
-
-    pub fn with_mut_collection<T>(
-        &self,
-        f: impl FnOnce(&mut Collection) -> T,
-    ) -> Result<T, CollectionError> {
-        STORAGE
-            .collections
-            .with_mut(|x| x.get_mut(self).unwrap().with_mut(|x| x.with_mut(f)))
+    pub fn with_mut(&mut self, f: impl FnOnce(&mut Collection)) -> Result<(), CollectionError> {
+        let id = self.id.clone();
+        let mut err = None;
+        self.radio.write_with(|mut v| {
+            if let Err(x) = v.0.get_mut(&id).unwrap().with_mut(|x| x.with_mut(f)) {
+                err = Some(x);
+            }
+        });
+        warn!("RSTneiarstarstnerastneio");
+        match err {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
     }
 
     // Usage for preventing crossing async boundries
-    pub fn replace(&self, collection: Collection) -> Result<(), CollectionError> {
-        self.with_mut_collection(|x| {
+    pub fn replace(&mut self, collection: Collection) -> Result<(), CollectionError> {
+        self.with_mut(|x| {
             *x = collection;
         })
     }
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+impl RadioChannel<Collections> for FetchCollectionChannel {}
+
+#[derive(
+    Debug,
+    Deserialize,
+    Serialize,
+    Clone,
+    Eq,
+    PartialEq,
+    Hash,
+    PartialOrd,
+    Ord,
+    derive_more::Display,
+    Copy,
+)]
+pub struct CollectionId(u64);
+
+pub type CollectionsRadio = Radio<Collections, FetchCollectionChannel>;
+
+pub fn use_collections_radio() -> CollectionsRadio {
+    use_radio(FetchCollectionChannel::CollectionCreated)
+}
+
+impl CollectionId {
+    pub fn use_collection_radio(self) -> CollectionRadio {
+        let radio = use_radio(FetchCollectionChannel::WithId(self.clone()));
+        CollectionRadio { id: self, radio }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Hash)]
 pub struct ModController {
     pub loader: ModLoader,
     pub manager: ModManager,
@@ -187,6 +233,7 @@ impl Collection {
         mod_loader: impl Into<Option<ModLoader>> + Send,
         picture_path: impl Into<PathBuf> + Send,
         advanced_options: Option<AdvancedOptions>,
+        mut collections_radio: CollectionsRadio,
     ) -> Result<Self, CollectionError> {
         let now_time = Utc::now();
         let loader = Self::create_loader(&display_name).context(StorageSnafu)?;
@@ -214,7 +261,18 @@ impl Collection {
             picture_path: picture_path.into(),
         };
 
-        collection.save()?;
+        collection.save_collection_file()?;
+
+        collections_radio
+            .write()
+            .0
+            .entry(collection.get_collection_id())
+            .and_modify(|x| {
+                if &*x != &collection {
+                    *x = collection.clone();
+                }
+            })
+            .or_insert(collection.clone());
 
         Ok(collection)
     }
@@ -236,7 +294,6 @@ impl Collection {
                 .add_project(project.into(), tag, mod_override.unwrap_or_default())
                 .await?;
         }
-        self.save()?;
         Ok(())
     }
 
@@ -261,7 +318,6 @@ impl Collection {
                 )
                 .await?;
         }
-        self.save()?;
         Ok(())
     }
     pub async fn add_curseforge_mod(
@@ -281,7 +337,6 @@ impl Collection {
                 .add_project(project.into(), tag, mod_override.unwrap_or_default())
                 .await?;
         }
-        self.save()?;
         Ok(())
     }
 
@@ -307,7 +362,6 @@ impl Collection {
     ) -> Result<JoinHandle<Result<(), LoggerEventError>>, CollectionError> {
         if self.launch_args.is_none() {
             self.launch_args = Some(self.verify_and_download_game().await?);
-            self.save()?;
         }
         vanilla::launcher::launch_game(self.launch_args.as_ref().unwrap(), signal)
             .await
@@ -358,21 +412,6 @@ impl Collection {
         )
         .save(&self)
         .context(StorageSnafu)?;
-        Ok(())
-    }
-
-    fn save(&self) -> Result<(), CollectionError> {
-        self.save_collection_file()?;
-        STORAGE
-            .collections
-            .write()
-            .entry(self.get_collection_id())
-            .and_modify(|x| {
-                if &*x.peek() != self {
-                    x.set(self.clone());
-                }
-            })
-            .or_insert(Signal::new(self.clone()));
         Ok(())
     }
 
@@ -441,7 +480,7 @@ impl Collection {
             .collect()
     }
 
-    pub fn scan() -> Result<Vec<Self>, CollectionError> {
+    pub fn scan() -> Result<Vec<Result<Self, StorageError>>, CollectionError> {
         let mut collections = Vec::new();
         let collection_base_dir = Self::get_base_path();
         create_dir_all(&collection_base_dir).context(IoSnafu {
@@ -471,13 +510,18 @@ impl Collection {
                 if file_name == COLLECTION_FILE_NAME {
                     let path = collection_base_dir.join(&base_entry_path);
                     let loader = StorageLoader::new(file_name.clone(), Cow::Borrowed(&path));
-                    let mut collection = loader.load::<Self>().context(StorageSnafu)?;
-                    let entry_name = collection.entry_path.file_name().unwrap().to_string_lossy();
+                    let mut collection = loader.load::<Self>();
+                    if let Ok(ref mut collection) = collection {
+                        let entry_name =
+                            collection.entry_path.file_name().unwrap().to_string_lossy();
 
-                    info!("Collection {entry_name} is read");
-                    if collection.entry_path != path {
-                        collection.entry_path = path;
-                        loader.save(&collection).context(StorageSnafu)?;
+                        info!("Collection {entry_name} has been successfully read");
+                        if collection.entry_path != path {
+                            collection.entry_path = path;
+                            loader.save(&collection).context(StorageSnafu)?;
+                        }
+                    } else {
+                        dioxus_logger::tracing::error!("{path:?} has invalid data");
                     }
                     collections.push(collection);
                 }
@@ -487,7 +531,7 @@ impl Collection {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Hash)]
 pub struct ModLoader {
     #[serde(rename = "type")]
     pub mod_loader_type: ModLoaderType,
@@ -509,7 +553,7 @@ impl Display for ModLoader {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, derive_more::Display)]
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, derive_more::Display, Hash)]
 pub enum ModLoaderType {
     Forge,
     NeoForge,
@@ -517,7 +561,7 @@ pub enum ModLoaderType {
     Quilt,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Hash)]
 pub struct AdvancedOptions {
     pub jvm_max_memory: Option<usize>,
     pub java_arguments: String,

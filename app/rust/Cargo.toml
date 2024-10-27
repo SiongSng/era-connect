@@ -44,3 +44,4 @@ snafu = "0.8.4"
 pausable_future = "0.2.0"
 xml = "0.8.20"
 derive_builder = "0.20.1"
+dioxus-radio = { git = "https://github.com/JustSimplyKyle/dioxus-radio" }

@@ -18,7 +18,7 @@ pub struct LatestVersion {
     pub snapshot: String,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Hash)]
 #[serde(rename_all = "camelCase")]
 pub struct VersionMetadata {
     /// A unique identifier of the version, for example `1.20.1` or `23w33a`.
@@ -80,7 +80,7 @@ impl VersionMetadata {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum VersionType {
     Release,

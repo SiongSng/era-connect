@@ -85,7 +85,7 @@ pub enum FetchError {
     Furse { source: furse::Error },
 }
 
-#[derive(Copy, Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, Deserialize, Serialize, PartialEq, Eq, Hash)]
 pub enum SupportedSide {
     Client,
     Server,
@@ -94,7 +94,7 @@ pub enum SupportedSide {
 
 pub type ModrinthSearchResponse = ferinth::structures::search::Response;
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, Hash)]
 pub struct ModMetadata {
     pub name: String,
     pub project_id: ProjectId,
@@ -264,7 +264,7 @@ impl PartialEq for ModMetadata {
 
 impl Eq for ModMetadata {}
 
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize, Hash)]
 pub enum ProjectId {
     Modrinth(String),
     Curseforge(i32),
@@ -292,6 +292,17 @@ pub enum RawModData {
     },
 }
 
+impl std::hash::Hash for RawModData {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match self {
+            RawModData::Modrinth(version) => {
+                version.date_published.offset().hash(state);
+            }
+            RawModData::Curseforge { data, .. } => data.file_date.offset().hash(state),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, derive_more::From)]
 pub enum Project {
     Modrinth(ferinth::structures::project::Project),
@@ -299,7 +310,7 @@ pub enum Project {
 }
 
 #[allow(clippy::unsafe_derive_deserialize)]
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, Hash)]
 pub struct ModManager {
     pub mods: Vec<ModMetadata>,
     #[serde(skip)]
@@ -1094,7 +1105,7 @@ async fn hashes_validate(path: impl AsRef<Path> + Send, vec: &[String]) -> bool 
 }
 
 /// `IgnoreMinorGameVersion` will behave like `IgnoreAllGameVersion` if operated on snapshots.
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize, Hash)]
 pub enum ModOverride {
     // ignore minor game version, using a latest-fully-compatiable mod available
     IgnoreMinorGameVersion,
@@ -1103,7 +1114,7 @@ pub enum ModOverride {
     IgnoreModLoader,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize, Hash)]
 pub enum Tag {
     Dependencies,
     Explicit,

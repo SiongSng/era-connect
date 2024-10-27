@@ -18,7 +18,7 @@ use crate::api::shared_resources::authentication::msa_flow::LoginFlowError;
 use crate::api::shared_resources::collection::Collection;
 use crate::api::shared_resources::collection::{AdvancedOptions, ModLoader};
 
-use super::collection::CollectionError;
+use super::collection::{CollectionError, CollectionId, CollectionsRadio};
 
 pub static DATA_DIR: Lazy<PathBuf> = Lazy::new(|| {
     dirs::data_dir()
@@ -77,7 +77,8 @@ pub async fn create_collection(
     version_metadata: VersionMetadata,
     mod_loader: impl Into<Option<ModLoader>> + Send,
     advanced_options: impl Into<Option<AdvancedOptions>> + Send,
-) -> Result<Collection, CollectionError> {
+    collections_radio: CollectionsRadio,
+) -> Result<CollectionId, CollectionError> {
     let display_name = display_name.into();
     let collection = Collection::create(
         display_name,
@@ -85,6 +86,7 @@ pub async fn create_collection(
         mod_loader.into(),
         picture_path,
         advanced_options.into(),
+        collections_radio,
     )?;
 
     info!(
@@ -96,5 +98,5 @@ pub async fn create_collection(
 
     info!("Successfully finished downloading game");
 
-    Ok(collection)
+    Ok(collection.get_collection_id())
 }
