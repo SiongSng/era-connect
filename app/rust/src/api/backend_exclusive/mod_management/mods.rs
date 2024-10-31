@@ -109,11 +109,18 @@ pub struct ModMetadata {
     pub icon_url: Option<Url>,
     pub last_updated: DateTime<Utc>,
     pub supported_sides: Option<Vec<SupportedSide>>,
-    // pub project: Project,
     base_icon_directory: PathBuf,
     game_directory: PathBuf,
     mod_data: RawModData,
 }
+
+impl PartialEq for ModMetadata {
+    fn eq(&self, other: &Self) -> bool {
+        self.project_id == other.project_id
+    }
+}
+
+impl Eq for ModMetadata {}
 
 pub enum Platform {
     Modrinth,
@@ -141,6 +148,9 @@ impl ModMetadata {
     }
 
     pub async fn disable(&mut self) -> io::Result<()> {
+        if self.enabled == false {
+            return Ok(());
+        }
         for file in self
             .get_filepaths()?
             .into_iter()
@@ -161,6 +171,9 @@ impl ModMetadata {
     }
 
     pub async fn enable(&mut self) -> io::Result<()> {
+        if self.enabled {
+            return Ok(());
+        }
         for file in self
             .get_filepaths()?
             .into_iter()
@@ -255,14 +268,6 @@ impl PartialOrd for ModMetadata {
         Some(self.last_updated.cmp(&other.last_updated))
     }
 }
-
-impl PartialEq for ModMetadata {
-    fn eq(&self, other: &Self) -> bool {
-        self.project_id == other.project_id
-    }
-}
-
-impl Eq for ModMetadata {}
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize, Hash)]
 pub enum ProjectId {

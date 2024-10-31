@@ -451,7 +451,7 @@ pub async fn fetch_launch_args_modded(
         prepare_vanilla_download(collection, game_manifest.clone()).await?;
     info!("Starts buffered downloading");
     execute_and_progress(
-        collection_id.clone(),
+        collection_id,
         vanilla_download_args,
         vanilla_bias,
         DownloadType::vanilla(),
@@ -471,7 +471,7 @@ pub async fn fetch_launch_args_modded(
     )
     .await?;
     execute_and_progress(
-        collection_id.clone(),
+        collection_id,
         modloader_download_args,
         modloader_download_bias,
         DownloadType::mod_loader_assets(),

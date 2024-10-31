@@ -15,7 +15,10 @@ use dioxus::{
     signals::Readable,
 };
 use dioxus_logger::tracing::{debug, error, info};
-use futures::{future::BoxFuture, StreamExt};
+use futures::{
+    future::{poll_fn, BoxFuture},
+    FutureExt, StreamExt,
+};
 use oauth2::url::ParseError;
 use pausable_future::Pausable;
 use reqwest::Url;
@@ -23,7 +26,7 @@ use tokio::{
     fs::{self, File},
     io::{AsyncReadExt, BufReader},
     sync::Semaphore,
-    task::JoinError,
+    task::{spawn_local, yield_now, JoinError},
     time::{self, Instant},
 };
 
@@ -449,7 +452,7 @@ pub async fn execute_and_progress(
     bias: DownloadBias,
     download_type: DownloadType,
 ) {
-    debug!("receiving download request");
+    info!("receiving download request");
     let calculate_speed = download_args.is_size;
     let download_complete = Arc::new(AtomicBool::new(false));
 
@@ -462,10 +465,10 @@ pub async fn execute_and_progress(
     spawn(async move {
         spawn(rolling_average(
             value,
-            download_complete_clone,
+            download_complete_clone.clone(),
             current_size_clone,
             total_size_clone,
-            id.clone(),
+            id,
             bias,
             calculate_speed,
         ));
@@ -475,10 +478,14 @@ pub async fn execute_and_progress(
             ScopeId::APP.throw_error(err);
         };
 
-        download_complete.store(true, Ordering::Release);
+        download_complete_clone.store(true, Ordering::Release);
     });
 
-    debug!("finish download request");
+    while !download_complete.load(Ordering::Relaxed) {
+        time::sleep(Duration::from_millis(250)).await;
+        info!("waiting download to be completed");
+    }
+    info!("finish download request");
 }
 
 pub async fn rolling_average(
