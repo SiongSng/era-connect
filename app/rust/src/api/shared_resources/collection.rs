@@ -1,4 +1,5 @@
 use std::fmt::Display;
+use std::future::Future;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::Path;
 pub use std::path::PathBuf;
@@ -92,38 +93,50 @@ pub struct Collections(pub OrderMap<CollectionId, Collection>);
 
 // Channels used to identify the subscribers of the State
 #[derive(PartialEq, Eq, Clone, Debug)]
-pub enum FetchCollectionChannel {
-    CollectionCreated,
+pub enum CollectionRadioChannel {
+    WholeListSubscription,
     WithId(CollectionId),
 }
+
+impl RadioChannel<Collections> for CollectionRadioChannel {}
 
 #[derive(Clone, Copy)]
 pub struct CollectionRadio {
     id: CollectionId,
-    radio: Radio<Collections, FetchCollectionChannel>,
+    radio: Radio<Collections, CollectionRadioChannel>,
 }
 
 impl CollectionRadio {
+    #[must_use]
     pub fn read(&self) -> ReadableRef<Signal<Collection>> {
-        <UnsyncStorage as AnyStorage>::try_map(self.radio.read(), |x| x.0.get(&self.id)).unwrap()
+        UnsyncStorage::try_map(self.radio.read(), |x| x.0.get(&self.id))
+            .unwrap_or_else(|| panic!("id does not exist in radio, {}", self.id))
     }
+
+    #[must_use]
     pub fn read_owned(&self) -> Collection {
-        self.radio.read().0.get(&self.id).unwrap().clone()
+        self.read().clone()
     }
 
     pub fn with_mut(&mut self, f: impl FnOnce(&mut Collection)) -> Result<(), CollectionError> {
-        let id = self.id.clone();
+        let id = self.id;
         let mut err = None;
         self.radio.write_with(|mut v| {
-            if let Err(x) = v.0.get_mut(&id).unwrap().with_mut(|x| x.with_mut(f)) {
+            if let Err(x) = v.0.get_mut(&id).unwrap().with_mut(f) {
                 err = Some(x);
             }
         });
-        warn!("RSTneiarstarstnerastneio");
-        match err {
-            Some(err) => Err(err),
-            None => Ok(()),
-        }
+        info!("Finish radio writing");
+        err.map_or_else(|| Ok(()), Err)
+    }
+
+    pub async fn with_async_mut<F: Future<Output = Collection> + Send>(
+        &mut self,
+        f: impl FnOnce(Collection) -> F + Send,
+    ) -> Result<(), CollectionError> {
+        let collection = self.read_owned().with_async_mut(f).await?;
+        self.with_mut(|x| *x = collection)?;
+        Ok(())
     }
 
     // Usage for preventing crossing async boundries
@@ -133,8 +146,6 @@ impl CollectionRadio {
         })
     }
 }
-
-impl RadioChannel<Collections> for FetchCollectionChannel {}
 
 #[derive(
     Debug,
@@ -151,15 +162,17 @@ impl RadioChannel<Collections> for FetchCollectionChannel {}
 )]
 pub struct CollectionId(u64);
 
-pub type CollectionsRadio = Radio<Collections, FetchCollectionChannel>;
+pub type CollectionsRadio = Radio<Collections, CollectionRadioChannel>;
 
+#[must_use]
 pub fn use_collections_radio() -> CollectionsRadio {
-    use_radio(FetchCollectionChannel::CollectionCreated)
+    use_radio(CollectionRadioChannel::WholeListSubscription)
 }
 
 impl CollectionId {
+    #[must_use]
     pub fn use_collection_radio(self) -> CollectionRadio {
-        let radio = use_radio(FetchCollectionChannel::WithId(self.clone()));
+        let radio = use_radio(CollectionRadioChannel::WithId(self));
         CollectionRadio { id: self, radio }
     }
 }
@@ -221,10 +234,26 @@ impl Collection {
         self.entry_path.as_path()
     }
 
-    pub fn with_mut<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> Result<T, CollectionError> {
+    pub(crate) fn with_mut<T>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> T,
+    ) -> Result<T, CollectionError> {
         let v = f(self);
         self.save_collection_file()?;
         Ok(v)
+    }
+
+    pub(crate) async fn with_async_mut<Fut>(
+        self,
+        f: impl FnOnce(Self) -> Fut + Send,
+    ) -> Result<Self, CollectionError>
+    where
+        Fut: Future<Output = Self> + Send,
+    {
+        let result = f(self).await;
+
+        result.save_collection_file()?;
+        Ok(result)
     }
     /// Creates a collection and return a collection with its loader attached
     pub fn create(
