@@ -134,7 +134,7 @@ impl CollectionRadio {
         &mut self,
         f: impl FnOnce(Collection) -> F + Send,
     ) -> Result<(), CollectionError> {
-        let collection = self.read_owned().with_async_mut(f).await?;
+        let collection = f(self.read_owned()).await;
         self.with_mut(|x| *x = collection)?;
         Ok(())
     }
@@ -243,18 +243,6 @@ impl Collection {
         Ok(v)
     }
 
-    pub(crate) async fn with_async_mut<Fut>(
-        self,
-        f: impl FnOnce(Self) -> Fut + Send,
-    ) -> Result<Self, CollectionError>
-    where
-        Fut: Future<Output = Self> + Send,
-    {
-        let result = f(self).await;
-
-        result.save_collection_file()?;
-        Ok(result)
-    }
     /// Creates a collection and return a collection with its loader attached
     pub fn create(
         display_name: String,
