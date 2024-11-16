@@ -1,6 +1,4 @@
-use dioxus::signals::{GlobalSignal, Signal};
-
-use crate::api::shared_resources::collection::{Collection, CollectionId};
+use dioxus::signals::GlobalSignal;
 
 use super::{
     account_storage::AccountStorage, global_settings::GlobalSettings,

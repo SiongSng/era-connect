@@ -6,10 +6,8 @@ pub use std::path::PathBuf;
 use std::{borrow::Cow, fs::create_dir_all};
 
 use chrono::{DateTime, Duration, Utc};
-use dioxus::signals::{
-    AnyStorage, ReadOnlySignal, Readable, ReadableRef, Signal, SyncSignal, UnsyncStorage, Writable,
-};
-use dioxus_logger::tracing::{info, warn};
+use dioxus::signals::{AnyStorage, ReadableRef, Signal, SyncSignal, UnsyncStorage};
+use dioxus_logger::tracing::info;
 use dioxus_radio::hooks::{use_radio, Radio, RadioChannel};
 use ordermap::OrderMap;
 use regex::Regex;
@@ -68,6 +66,10 @@ pub enum CollectionError {
     },
     LaunchGameError {
         source: LaunchGameError,
+    },
+    #[snafu(display("Some error happenend within `with_async_mut`, error: {source:#?}"))]
+    AsyncWrite {
+        source: anyhow::Error,
     },
 }
 
@@ -130,20 +132,13 @@ impl CollectionRadio {
         err.map_or_else(|| Ok(()), Err)
     }
 
-    pub async fn with_async_mut<F: Future<Output = Collection> + Send>(
+    pub async fn with_async_mut<F: Future<Output = Result<Collection, anyhow::Error>>>(
         &mut self,
         f: impl FnOnce(Collection) -> F + Send,
     ) -> Result<(), CollectionError> {
-        let collection = f(self.read_owned()).await;
+        let collection = f(self.read_owned()).await.context(AsyncWriteSnafu)?;
         self.with_mut(|x| *x = collection)?;
         Ok(())
-    }
-
-    // Usage for preventing crossing async boundries
-    pub fn replace(&mut self, collection: Collection) -> Result<(), CollectionError> {
-        self.with_mut(|x| {
-            *x = collection;
-        })
     }
 }
 

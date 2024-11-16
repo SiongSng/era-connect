@@ -15,10 +15,7 @@ use dioxus::{
     signals::Readable,
 };
 use dioxus_logger::tracing::{debug, error, info};
-use futures::{
-    future::{poll_fn, BoxFuture},
-    FutureExt, StreamExt,
-};
+use futures::{future::BoxFuture, StreamExt};
 use oauth2::url::ParseError;
 use pausable_future::Pausable;
 use reqwest::Url;
@@ -26,7 +23,7 @@ use tokio::{
     fs::{self, File},
     io::{AsyncReadExt, BufReader},
     sync::Semaphore,
-    task::{spawn_local, yield_now, JoinError},
+    task::JoinError,
     time::{self, Instant},
 };
 
