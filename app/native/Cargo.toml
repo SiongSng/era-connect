@@ -10,7 +10,7 @@ crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
 struct-key-value-pair = { path = "crates/struct-key-value-pair" }
-anyhow = { version = "1.0.74", features = ["backtrace"] }
+anyhow = { version = "1.0.75", features = ["backtrace"] }
 bytes = "1.4.0"
 color-eyre = "0.6.2"
 crossbeam = { version = "0.8.2", features = ["crossbeam-channel"] }
