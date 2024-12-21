@@ -11,7 +11,7 @@ use std::{
 
 use bytes::{BufMut, Bytes, BytesMut};
 use dioxus::{
-    prelude::{spawn, ScopeId},
+    prelude::{spawn, throw_error, ScopeId},
     signals::Readable,
 };
 use dioxus_logger::tracing::{debug, error, info};
@@ -472,7 +472,7 @@ pub async fn execute_and_progress(
         let download_id = DownloadId::new(id, download_type);
 
         if let Err(err) = join_futures(download_id, handles).await {
-            ScopeId::APP.throw_error(err);
+            throw_error(err);
         };
 
         download_complete_clone.store(true, Ordering::Release);
@@ -536,9 +536,8 @@ pub async fn rolling_average(
             }
 
             let average_speed = average_speed.iter().sum::<f64>() / average_speed.len() as f64;
-            debug!("speed: {}", average_speed);
 
-            Progress {
+            let progress = Progress {
                 download_type,
                 percentages,
                 speed: Some(average_speed),
@@ -546,7 +545,9 @@ pub async fn rolling_average(
                 total_size: Some(total),
                 bias,
                 paused: false,
-            }
+            };
+            debug!("progress: {:#?}", progress);
+            progress
         } else {
             Progress {
                 download_type,

@@ -100,17 +100,26 @@ pub enum CollectionRadioChannel {
     WithId(CollectionId),
 }
 
+pub type CollectionsRadio = Radio<Collections, CollectionRadioChannel>;
+
 impl RadioChannel<Collections> for CollectionRadioChannel {}
 
 #[derive(Clone, Copy)]
 pub struct CollectionRadio {
     id: CollectionId,
-    radio: Radio<Collections, CollectionRadioChannel>,
+    radio: CollectionsRadio,
 }
 
 impl CollectionRadio {
     #[must_use]
     pub fn read(&self) -> ReadableRef<Signal<Collection>> {
+        UnsyncStorage::try_map(self.radio.read(), |x| x.0.get(&self.id))
+            .unwrap_or_else(|| panic!("id does not exist in radio, {}", self.id))
+    }
+
+    #[must_use]
+    // fake alais
+    pub fn peek(&self) -> ReadableRef<Signal<Collection>> {
         UnsyncStorage::try_map(self.radio.read(), |x| x.0.get(&self.id))
             .unwrap_or_else(|| panic!("id does not exist in radio, {}", self.id))
     }
@@ -136,7 +145,7 @@ impl CollectionRadio {
         &mut self,
         f: impl FnOnce(Collection) -> F + Send,
     ) -> Result<(), CollectionError> {
-        let collection = f(self.read_owned()).await.context(AsyncWriteSnafu)?;
+        let collection = f(self.peek().clone()).await.context(AsyncWriteSnafu)?;
         self.with_mut(|x| *x = collection)?;
         Ok(())
     }
@@ -157,11 +166,19 @@ impl CollectionRadio {
 )]
 pub struct CollectionId(u64);
 
-pub type CollectionsRadio = Radio<Collections, CollectionRadioChannel>;
-
 #[must_use]
 pub fn use_collections_radio() -> CollectionsRadio {
     use_radio(CollectionRadioChannel::WholeListSubscription)
+}
+
+#[must_use]
+pub fn use_keys() -> Vec<CollectionId> {
+    use_radio(CollectionRadioChannel::WholeListSubscription)
+        .read()
+        .0
+        .keys()
+        .copied()
+        .collect()
 }
 
 impl CollectionId {
@@ -275,16 +292,10 @@ impl Collection {
 
         collection.save_collection_file()?;
 
-        collections_radio
-            .write()
-            .0
-            .entry(collection.get_collection_id())
-            .and_modify(|x| {
-                if &*x != &collection {
-                    *x = collection.clone();
-                }
-            })
-            .or_insert(collection.clone());
+        collections_radio.write_with(|mut v| {
+            v.0.insert(collection.get_collection_id(), collection.clone());
+            info!("Finish inserting collection");
+        });
 
         Ok(collection)
     }

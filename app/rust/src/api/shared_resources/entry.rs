@@ -77,7 +77,7 @@ pub async fn create_collection(
     version_metadata: VersionMetadata,
     mod_loader: impl Into<Option<ModLoader>> + Send,
     advanced_options: impl Into<Option<AdvancedOptions>> + Send,
-    collections_radio: CollectionsRadio,
+    mut collections_radio: CollectionsRadio,
 ) -> Result<CollectionId, CollectionError> {
     let display_name = display_name.into();
     let collection = Collection::create(

@@ -438,7 +438,7 @@ pub async fn prepare_vanilla_download(
     info!("Asset information grepped, now turning them into downloadable args");
     parallel_assets_download(asset_settings, &current_size, &total_size, &mut handles).await?;
 
-    if let Some(advanced_option) = &collection.advanced_options() {
+    if let Some(advanced_option) = collection.advanced_options() {
         if let Some(max_memory) = advanced_option.jvm_max_memory {
             jvm_flags.arguments.push(format!("-Xmx{max_memory}M"));
         }
