@@ -85,7 +85,7 @@ pub struct GameOptions {
     pub version_type: String,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Hash)]
 pub struct LaunchArgs {
     pub jvm_args: Vec<String>,
     pub main_class: String,
@@ -438,7 +438,7 @@ pub async fn prepare_vanilla_download(
     info!("Asset information grepped, now turning them into downloadable args");
     parallel_assets_download(asset_settings, &current_size, &total_size, &mut handles).await?;
 
-    if let Some(advanced_option) = &collection.advanced_options() {
+    if let Some(advanced_option) = collection.advanced_options() {
         if let Some(max_memory) = advanced_option.jvm_max_memory {
             jvm_flags.arguments.push(format!("-Xmx{max_memory}M"));
         }

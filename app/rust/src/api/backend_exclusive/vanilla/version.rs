@@ -8,7 +8,7 @@ const VERSION_MANIFEST_URL: &str = "https://meta.modrinth.com/minecraft/v0/manif
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct VersionsManifest {
-    pub latest: LatestVersion,
+    latest: LatestVersion,
     pub versions: Vec<VersionMetadata>,
 }
 
@@ -18,7 +18,7 @@ pub struct LatestVersion {
     pub snapshot: String,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Hash)]
 #[serde(rename_all = "camelCase")]
 pub struct VersionMetadata {
     /// A unique identifier of the version, for example `1.20.1` or `23w33a`.
@@ -46,13 +46,26 @@ impl VersionMetadata {
             .cloned())
     }
     pub async fn latest_release() -> Result<Self, ManifestProcessingError> {
-        let key = Self::get_version_manifest().await?.latest.release;
+        let key = Self::get_version_manifest()
+            .await?
+            .versions
+            .iter()
+            .filter(|x| x.is_release())
+            .max_by_key(|x| x.release_time)
+            .map(|x| x.id.clone())
+            .unwrap();
         Self::from_id(&key)
             .await?
             .context(ManifestLookUpSnafu { key })
     }
     pub async fn latest_snapshot() -> Result<Self, ManifestProcessingError> {
-        let key = Self::get_version_manifest().await?.latest.snapshot;
+        let key = Self::get_version_manifest()
+            .await?
+            .versions
+            .iter()
+            .max_by_key(|x| x.release_time)
+            .map(|x| x.id.clone())
+            .unwrap();
         Self::from_id(&key)
             .await?
             .context(ManifestLookUpSnafu { key })
@@ -80,7 +93,7 @@ impl VersionMetadata {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum VersionType {
     Release,
