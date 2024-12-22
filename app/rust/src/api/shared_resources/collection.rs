@@ -586,6 +586,21 @@ pub enum ModLoaderType {
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Hash)]
 pub struct AdvancedOptions {
-    pub jvm_max_memory: Option<usize>,
+    pub jvm_max_memory: Option<Memory>,
     pub java_arguments: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Hash, Copy)]
+pub enum Memory {
+    Megabytes(usize),
+    Gigabytes(usize),
+}
+
+impl Memory {
+    pub fn to_java_size(&self) -> String {
+        match self {
+            Memory::Megabytes(m) => format!("{m}M"),
+            Memory::Gigabytes(m) => format!("{m}G"),
+        }
+    }
 }

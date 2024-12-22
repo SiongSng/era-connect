@@ -480,7 +480,6 @@ pub async fn execute_and_progress(
 
     while !download_complete.load(Ordering::Relaxed) {
         time::sleep(Duration::from_millis(250)).await;
-        info!("waiting download to be completed");
     }
     info!("finish download request");
 }

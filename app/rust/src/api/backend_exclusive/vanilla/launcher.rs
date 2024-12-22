@@ -274,10 +274,11 @@ pub async fn launch_game(
     launch_vec.extend(&launch_args.jvm_args);
     launch_vec.push(&launch_args.main_class);
     launch_vec.extend(&launch_args.game_args);
+
     let mut child = tokio::process::Command::new("java")
         .args(launch_vec)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        // .stderr(Stdio::piped())
         .spawn()
         .context(TokioSpawnTaskSnafu)?;
 
@@ -440,14 +441,18 @@ pub async fn prepare_vanilla_download(
 
     if let Some(advanced_option) = collection.advanced_options() {
         if let Some(max_memory) = advanced_option.jvm_max_memory {
-            jvm_flags.arguments.push(format!("-Xmx{max_memory}M"));
+            jvm_flags
+                .arguments
+                .push(format!("-Xmx{}", max_memory.to_java_size()));
         }
-        jvm_flags.arguments.extend(
-            advanced_option
-                .java_arguments
-                .split(' ')
-                .map(ToOwned::to_owned),
-        );
+        if !advanced_option.java_arguments.is_empty() {
+            jvm_flags.arguments.extend(
+                advanced_option
+                    .java_arguments
+                    .split(' ')
+                    .map(ToOwned::to_owned),
+            );
+        }
     }
 
     info!("Setup logging");

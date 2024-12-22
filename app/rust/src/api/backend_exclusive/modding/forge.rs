@@ -237,6 +237,10 @@ pub fn processers_process(
         .get("jvm")
         .map_or(Ok(vec![]), Vec::<String>::deserialize)
         .context(DesearializationSnafu)?;
+    let jvm = jvm
+        .into_iter()
+        .map(|x| x.replace(" ", ""))
+        .collect::<Vec<_>>();
     let game = arguments
         .get("game")
         .map_or(Ok(vec![]), Vec::<String>::deserialize)
