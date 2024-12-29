@@ -1,6 +1,8 @@
+use std::convert::TryInto;
 use std::fmt::Display;
 use std::future::Future;
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 pub use std::path::PathBuf;
 use std::{borrow::Cow, fs::create_dir_all};
@@ -9,11 +11,13 @@ use chrono::{DateTime, Duration, Utc};
 use dioxus::signals::{AnyStorage, ReadableRef, Signal, SyncSignal, UnsyncStorage};
 use dioxus_logger::tracing::info;
 use dioxus_radio::hooks::{use_radio, Radio, RadioChannel};
+use futures::FutureExt;
 use ordermap::OrderMap;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use snafu::prelude::*;
+use tokio::fs::File;
 use tokio::task::JoinHandle;
 
 use crate::api::backend_exclusive::mod_management::mods::ModError;
@@ -110,6 +114,30 @@ pub struct CollectionRadio {
     radio: CollectionsRadio,
 }
 
+/// The return type of `.with_async_mut()` must either be
+/// a. `Base`, for a typical return that does not need to provide any extra information
+/// b. if any information is needed, you can use `(Base, T)`
+pub trait ClosureReturn<Base> {
+    type Value;
+    fn get(s: Self) -> (Base, Self::Value)
+    where
+        Self: Sized;
+}
+
+impl<T, Base> ClosureReturn<Base> for (Base, T) {
+    type Value = T;
+    fn get(s: Self) -> (Base, Self::Value) {
+        s
+    }
+}
+
+impl<Base> ClosureReturn<Base> for Base {
+    type Value = ();
+    fn get(s: Self) -> (Base, Self::Value) {
+        (s, ())
+    }
+}
+
 impl CollectionRadio {
     #[must_use]
     pub fn read(&self) -> ReadableRef<Signal<Collection>> {
@@ -141,13 +169,20 @@ impl CollectionRadio {
         err.map_or_else(|| Ok(()), Err)
     }
 
-    pub async fn with_async_mut<F: Future<Output = Result<Collection, anyhow::Error>>>(
+    pub async fn with_async_mut<
+        Ret: ClosureReturn<Collection>,
+        Fut: Future<Output = Result<Ret, anyhow::Error>>,
+    >(
         &mut self,
-        f: impl FnOnce(Collection) -> F + Send,
-    ) -> Result<(), CollectionError> {
-        let collection = f(self.peek().clone()).await.context(AsyncWriteSnafu)?;
+        f: impl FnOnce(Collection) -> Fut + Send,
+    ) -> Result<Ret::Value, CollectionError> {
+        let return_value = f(self.peek().clone()).await.context(AsyncWriteSnafu)?;
+
+        let (collection, value) = Ret::get(return_value);
+
         self.with_mut(|x| *x = collection)?;
-        Ok(())
+
+        Ok(value)
     }
 }
 
@@ -208,10 +243,32 @@ impl ModController {
     }
 }
 
+pub struct ScreenShot {
+    pub path: PathBuf,
+}
+
+impl ScreenShot {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    pub fn get_size(&self) -> std::io::Result<Size> {
+        let file = std::fs::File::open(&self.path)?;
+        let size = Size::Bytes(file.metadata()?.size() as usize);
+        Ok(size)
+    }
+
+    pub fn get_creation_date(&self) -> std::io::Result<DateTime<Utc>> {
+        let file = std::fs::File::open(&self.path)?;
+        let time = file.metadata()?.mtime();
+
+        Ok(DateTime::from_timestamp(time, 0).unwrap())
+    }
+}
+
 const COLLECTION_FILE_NAME: &str = "collection.json";
 const COLLECTION_BASE: &str = "collections";
 
-/// if a method has `&mut self`, remember to call `self.save()` to actually save it!
 impl Collection {
     #[must_use]
     pub const fn display_name(&self) -> &String {
@@ -298,6 +355,21 @@ impl Collection {
         });
 
         Ok(collection)
+    }
+
+    pub async fn get_screenshots(&self) -> Result<Vec<ScreenShot>, CollectionError> {
+        let game_directory = self.game_directory();
+        let Ok(x) = game_directory.join("screenshots").read_dir() else {
+            return Ok(vec![]);
+        };
+        x.map(|x| {
+            x.context(IoSnafu {
+                path: &game_directory,
+            })
+        })
+        .map(|x| Ok::<_, CollectionError>(x?.path()))
+        .map(|x| Ok(ScreenShot::new(x?)))
+        .collect()
     }
 
     /// use project id(slug also works) to add mod, will deal with dependencies insertion
@@ -586,21 +658,37 @@ pub enum ModLoaderType {
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Hash)]
 pub struct AdvancedOptions {
-    pub jvm_max_memory: Option<Memory>,
+    pub jvm_max_memory: Option<Size>,
     pub java_arguments: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Hash, Copy)]
-pub enum Memory {
+pub enum Size {
+    Bytes(usize),
     Megabytes(usize),
     Gigabytes(usize),
 }
 
-impl Memory {
+impl Size {
     pub fn to_java_size(&self) -> String {
         match self {
-            Memory::Megabytes(m) => format!("{m}M"),
-            Memory::Gigabytes(m) => format!("{m}G"),
+            Self::Bytes(m) => format!("{}M", m / 1024 / 1024),
+            Size::Megabytes(m) => format!("{m}M"),
+            Size::Gigabytes(m) => format!("{m}G"),
+        }
+    }
+    pub fn to_bytes(&self) -> f64 {
+        match self {
+            Size::Bytes(x) => *x as f64,
+            Size::Megabytes(x) => *x as f64 * 1024. * 1024.,
+            Size::Gigabytes(x) => *x as f64 * 1024. * 1024. * 1024.,
+        }
+    }
+    pub fn to_megabytes(&self) -> f64 {
+        match self {
+            Size::Bytes(x) => *x as f64 / 1024. / 1024.,
+            Size::Megabytes(x) => *x as f64,
+            Size::Gigabytes(x) => *x as f64 * 1024.,
         }
     }
 }
