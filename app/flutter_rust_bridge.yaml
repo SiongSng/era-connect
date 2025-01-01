@@ -1,3 +1,0 @@
-rust_input: rust/src/api/shared_resources/**/*.rs
-dart_output: lib/src/rust
-full_dep: true
